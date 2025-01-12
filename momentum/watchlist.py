@@ -6,10 +6,8 @@ Objective:
        - US small-cap tech stocks using custom EquityQuery screener.
        - Top daily gainers in the small-cap tech sector.
        - Stocks breaking out of consolidation.
-    2) Score them using a simple momentum scoring system:
-       +1 for each day the stock has closed higher than the previous day.
-    3) Ensure the watchlist maintains a minimum of 20 stocks by dynamically
-       updating and re-populating as needed.
+    2) Score them using a simple momentum scoring system: +1 for each day the stock has closed higher than the previous day.
+    3) Ensure the watchlist maintains a minimum of 20 stocks by dynamically updating and re-populating as needed.
     4) Ensure robust logging and data handling.
 """
 
@@ -66,35 +64,36 @@ def build_aggressive_small_cap_query() -> dict:
         dict: The constructed EquityQuery as a dictionary.
     """
     try:
-        # Sector is Technology and Region is US
+        # Define individual queries
+        # Sector is Technology
         sector_eq = {
             'operator': 'eq',
             'operands': ['sector', 'Technology']
         }
-        us_region = {
-            'operator': 'eq',
-            'operands': ['region', 'us']
-        }
+
         # Market Cap between 50 million USD and 2 billion USD
         market_cap_gt = {
             'operator': 'gt',
-            'operands': ['intradaymarketcap', 50000000]
+            'operands': ['intradaymarketcap', 50000000]  # Greater than 50 million
         }
+
         market_cap_lt = {
             'operator': 'lt',
-            'operands': ['intradaymarketcap', 2000000000]
+            'operands': ['intradaymarketcap', 2000000000]  # Less than 2 billion
         }
+
         # Average daily volume over the last 3 months greater than 100,000
         avg_vol_gt = {
             'operator': 'gt',
             'operands': ['avgdailyvol3m', 100000]
         }
 
-        # Combine criteria using AND
+        # Combine queries using AND
         combined_query = {
             'operator': 'and',
-            'operands': [sector_eq, us_region, market_cap_gt, market_cap_lt, avg_vol_gt]
+            'operands': [sector_eq, market_cap_gt, market_cap_lt, avg_vol_gt]
         }
+
         return combined_query
     except Exception as e:
         logger.error(f"Error constructing Aggressive Small-Cap EquityQuery: {e}")
@@ -102,33 +101,34 @@ def build_aggressive_small_cap_query() -> dict:
 
 def build_top_gainers_query() -> dict:
     """
-    Constructs an EquityQuery dictionary to filter for top daily gainers in the small-cap tech sector.
+    Constructs an EquityQuery dictionary to filter for top daily gainers in small-cap tech sector.
     
     Returns:
         dict: The constructed EquityQuery as a dictionary.
     """
     try:
-        # Using same basic criteria as aggressive query but without the volume filter:
+        # Reuse the sector and market cap criteria
         sector_eq = {
             'operator': 'eq',
             'operands': ['sector', 'Technology']
         }
-        us_region = {
-            'operator': 'eq',
-            'operands': ['region', 'us']
-        }
+
         market_cap_gt = {
             'operator': 'gt',
-            'operands': ['intradaymarketcap', 50000000]
+            'operands': ['intradaymarketcap', 50000000]  # Greater than 50 million
         }
+
         market_cap_lt = {
             'operator': 'lt',
-            'operands': ['intradaymarketcap', 2000000000]
+            'operands': ['intradaymarketcap', 2000000000]  # Less than 2 billion
         }
+
+        # Combine queries using AND
         combined_query = {
             'operator': 'and',
-            'operands': [sector_eq, us_region, market_cap_gt, market_cap_lt]
+            'operands': [sector_eq, market_cap_gt, market_cap_lt]
         }
+
         return combined_query
     except Exception as e:
         logger.error(f"Error constructing Top Gainers EquityQuery: {e}")
@@ -137,33 +137,29 @@ def build_top_gainers_query() -> dict:
 def build_breakout_query() -> dict:
     """
     Constructs an EquityQuery dictionary to filter for stocks breaking out of consolidation.
-    Since historical volatility is not a supported field, we substitute by requiring that
-    today's percent change is moderately high (between 3% and 10%) while the stock has low average volume.
     
     Returns:
         dict: The constructed EquityQuery as a dictionary.
     """
     try:
-        # Define percent change criteria between 3% and 10%
-        pct_change_btwn = {
-            'operator': 'btwn',
-            'operands': ['percentchange', 3, 10]
-        }
-        # For consolidation, assume a low average volume (e.g., <150,000)
-        low_avg_vol = {
+        # Low historical volatility over last 20 days (<20)
+        low_volatility = {
             'operator': 'lt',
-            'operands': ['avgdailyvol3m', 150000]
+            'operands': ['historicalvolatility', 20]
         }
-        # Also, add US region filtering
-        us_region = {
-            'operator': 'eq',
-            'operands': ['region', 'us']
+
+        # Recent price increase above 3% in the last 3 days (adjusted from 5% to 3%)
+        recent_price_spike = {
+            'operator': 'gt',
+            'operands': ['percentchange', 3]
         }
-        # Combine these using AND
+
+        # Combine queries using AND
         breakout_query = {
             'operator': 'and',
-            'operands': [pct_change_btwn, low_avg_vol, us_region]
+            'operands': [low_volatility, recent_price_spike]
         }
+
         return breakout_query
     except Exception as e:
         logger.error(f"Error constructing Breakout EquityQuery: {e}")
@@ -190,7 +186,8 @@ def fetch_tickers(screener: yf.Screener, screener_body: dict, limit: int) -> Lis
             return []
 
         tickers = [quote['symbol'] for quote in screener_response['quotes']]
-        return tickers[:limit]
+        tickers = tickers[:limit]
+        return tickers
     except Exception as e:
         logger.error(f"Error fetching tickers with EquityQuery: {e}")
         return []
@@ -199,14 +196,23 @@ def fetch_watchlist(
     smallcap_limit: int = 100,
     gainers_limit: int = 100,
     breakout_limit: int = 50,
-    additional_fill_limit: int = 50,
+    additional_fill_limit: int = 50,  # Renamed from equityquery_fill_limit
     min_size: int = 20,
-    market_cap_threshold: float = 2e9,    # Upper cap: 2 billion USD
-    market_cap_minimum: float = 50000000  # Lower cap: 50 million USD
+    market_cap_threshold: float = 2e9,    # 2 billion USD
+    market_cap_minimum: float = 50000000  # 50 million USD
 ) -> List[str]:
     """
     Fetch a watchlist combining US small-cap tech stocks, top daily gainers,
     and stocks breaking out of consolidation using custom EquityQueries.
+    
+    Parameters:
+        smallcap_limit (int): Max number of aggressive small-cap tech tickers to fetch.
+        gainers_limit (int): Max number of top small-cap tech gainers to fetch.
+        breakout_limit (int): Max number of stocks breaking out of consolidation to fetch.
+        additional_fill_limit (int): Max number of additional small-cap tech tickers to fetch using EquityQuery.
+        min_size (int): Minimum number of stocks to include in the watchlist.
+        market_cap_threshold (float): Upper market cap threshold to define small-cap stocks.
+        market_cap_minimum (float): Lower market cap threshold to exclude micro-cap stocks.
     
     Returns:
         List[str]: A list of unique stock ticker symbols.
@@ -217,36 +223,44 @@ def fetch_watchlist(
     try:
         logger.info("Initializing yfinance Screener...")
         screener = yf.Screener()
+    except AttributeError:
+        logger.error("yfinance.Screener class not found. Ensure you have the latest version of yfinance installed.")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"Error initializing Screener: {e}")
         sys.exit(1)
 
-    # Exclude non-US tickers using problematic suffixes
+    # Define problematic suffixes to exclude (non-US tickers)
     problematic_suffixes = [
-        '.AX', '.IL', '.HK', '.BO', '.SZ', '.TA', '.SI', '.MI',
-        '.OMX', '.L', '.A', '.B', '.C', '.D', '.E', '.F', '.G',
-        '.H', '.I', '.J', '.K', '.M', '.N', '.O', '.P', '.Q', '.R',
-        '.S', '.T', '.U', '.V', '.W', '.Y', '.Z'
+        '.AX', '.IL', '.HK', '.BO', '.SZ', '.TA', '.SI', '.MI', '.OMX', '.L', '.A', '.B', '.C', '.D', 
+        '.E', '.F', '.G', '.H', '.I', '.J', '.K', '.M', '.N', '.O', '.P', '.Q', '.R', '.S', '.T', '.U',
+        '.V', '.W', '.Y', '.Z'  # Common non-US exchange suffixes
     ]
 
+    # Helper function to validate tickers
     def validate_ticker(sym: str) -> bool:
         return not any(sym.endswith(suf) for suf in problematic_suffixes)
 
-    # 1. Fetch Aggressive Small-Cap Tech Stocks
+    # 1. Fetch Aggressive Small-Cap Tech Stocks (40% of watchlist)
     try:
         logger.info("Fetching Aggressive Small-Cap Tech Stocks using EquityQuery...")
         aggressive_query = build_aggressive_small_cap_query()
+
+        # Screener body for Aggressive Small-Cap Tech Stocks
         aggressive_body = {
             "offset": 0,
-            "size": smallcap_limit,
+            "size": smallcap_limit,  # Fetch up to smallcap_limit tickers
             "sortField": "intradaymarketcap",
-            "sortType": "asc",
+            "sortType": "asc",  # Smaller market caps first
             "quoteType": "equity",
             "query": aggressive_query,
             "userId": "",
             "userIdType": "guid"
         }
+
         aggressive_tickers = fetch_tickers(screener, aggressive_body, smallcap_limit)
+
+        # Validate and add to watchlist
         valid_aggressive_small_caps = []
         for sym in aggressive_tickers:
             if not validate_ticker(sym):
@@ -259,29 +273,36 @@ def fetch_watchlist(
                     valid_aggressive_small_caps.append(sym)
                     logger.info(f"Added small-cap tech: {sym}, Market Cap=${market_cap}")
                 else:
-                    logger.debug(f"Ticker {sym} skipped; market cap ${market_cap} out of range.")
+                    logger.debug(f"Ticker {sym} does not meet market cap criteria (Market Cap=${market_cap}). Skipping.")
             except Exception as ee:
                 logger.warning(f"Error fetching info for {sym}: {ee}")
+                continue
+
         watchlist.update(valid_aggressive_small_caps)
         logger.info(f"Fetched {len(valid_aggressive_small_caps)} aggressive small-cap tech tickers.")
     except Exception as e:
-        logger.error(f"Error fetching aggressive small-cap tech tickers: {e}")
+        logger.error(f"Error fetching aggressive small-cap tech tickers using EquityQuery: {e}")
 
-    # 2. Fetch Top Daily Gainers in Small-Cap Tech Sector
+    # 2. Fetch Top Daily Gainers in Small-Cap Tech Sector (35% of watchlist)
     try:
         logger.info("Fetching Top Daily Gainers in Small-Cap Tech Sector using EquityQuery...")
         gainers_query = build_top_gainers_query()
+
+        # Screener body for Top Daily Gainers
         gainers_body = {
             "offset": 0,
-            "size": gainers_limit,
+            "size": gainers_limit,  # Fetch up to gainers_limit tickers
             "sortField": "percentchange",
-            "sortType": "desc",
+            "sortType": "desc",  # Top gainers first
             "quoteType": "equity",
             "query": gainers_query,
             "userId": "",
             "userIdType": "guid"
         }
+
         gainers_tickers = fetch_tickers(screener, gainers_body, gainers_limit)
+
+        # Validate and add to watchlist
         valid_small_cap_gainers = []
         for sym in gainers_tickers:
             if not validate_ticker(sym):
@@ -293,31 +314,38 @@ def fetch_watchlist(
                 market_cap = info.get("marketCap", 0)
                 if sector == "technology" and market_cap and market_cap_minimum <= market_cap < market_cap_threshold:
                     valid_small_cap_gainers.append(sym)
-                    logger.info(f"Added top gainer tech: {sym}, Market Cap=${market_cap}")
+                    logger.info(f"Added top gainer tech: {sym}, Sector={sector.capitalize()}, Market Cap=${market_cap}")
                 else:
-                    logger.debug(f"Ticker {sym} skipped; criteria not met (Sector={sector}, Market Cap=${market_cap}).")
+                    logger.debug(f"Ticker {sym} does not meet criteria (Sector={sector}, Market Cap=${market_cap}). Skipping.")
             except Exception as ee:
                 logger.warning(f"Error fetching info for {sym}: {ee}")
+                continue
+
         watchlist.update(valid_small_cap_gainers)
         logger.info(f"Fetched {len(valid_small_cap_gainers)} top small-cap tech gainers.")
     except Exception as e:
-        logger.error(f"Error fetching top daily gainers: {e}")
+        logger.error(f"Error fetching small-cap tech gainers using EquityQuery: {e}")
 
-    # 3. Fetch Stocks Breaking Out of Consolidation
+    # 3. Fetch Stocks Breaking Out of Consolidation (15% of watchlist)
     try:
         logger.info("Fetching Stocks Breaking Out of Consolidation using EquityQuery...")
         breakout_query = build_breakout_query()
+
+        # Screener body for Breakout Stocks
         breakout_body = {
             "offset": 0,
-            "size": breakout_limit,
+            "size": breakout_limit,  # Fetch up to breakout_limit tickers
             "sortField": "percentchange",
-            "sortType": "desc",
+            "sortType": "desc",  # Highest percent change first
             "quoteType": "equity",
             "query": breakout_query,
             "userId": "",
             "userIdType": "guid"
         }
+
         breakout_tickers = fetch_tickers(screener, breakout_body, breakout_limit)
+
+        # Validate and add to watchlist
         valid_breakout_stocks = []
         for sym in breakout_tickers:
             if not validate_ticker(sym):
@@ -330,24 +358,61 @@ def fetch_watchlist(
                     valid_breakout_stocks.append(sym)
                     logger.info(f"Added breakout stock: {sym}, Market Cap=${market_cap}")
                 else:
-                    logger.debug(f"Ticker {sym} skipped; market cap ${market_cap} out of range.")
+                    logger.debug(f"Ticker {sym} does not meet market cap criteria (Market Cap=${market_cap}). Skipping.")
             except Exception as ee:
                 logger.warning(f"Error fetching info for breakout stock {sym}: {ee}")
+                continue
+
         watchlist.update(valid_breakout_stocks)
         logger.info(f"Fetched {len(valid_breakout_stocks)} stocks breaking out of consolidation.")
     except Exception as e:
-        logger.error(f"Error fetching breakout stocks: {e}")
+        logger.error(f"Error fetching breakout stocks using EquityQuery: {e}")
 
-    # 4. Ensure Watchlist Meets Minimum Size (if not, fill using additional aggressive tickers)
-    if len(watchlist) < min_size:
-        additional_needed = min_size - len(watchlist)
-        logger.warning(f"Watchlist has only {len(watchlist)} tickers (min required: {min_size}).")
-        logger.info(f"Fetching additional {additional_needed} small-cap tech stocks using EquityQuery...")
+    # 4. Ensure Watchlist Minimum Size by Allocating Specific Counts
+    # Define allocations
+    allocations = {
+        'aggressive_small_cap': 8,   # 40% of 20
+        'top_gainers': 7,            # 35% of 20
+        'breakout_stocks': 3          # 15% of 20
+    }
+
+    # Adjust allocations based on fetched tickers
+    final_watchlist = set()
+
+    # Helper function to allocate tickers
+    def allocate_tickers(tickers: List[str], count: int, category: str):
+        allocated = 0
+        for sym in tickers:
+            if sym not in final_watchlist:
+                final_watchlist.add(sym)
+                allocated += 1
+                logger.info(f"Allocated {sym} to watchlist from {category}.")
+                if allocated >= count:
+                    break
+        logger.info(f"Allocated {allocated} tickers from {category}.")
+
+    # Allocate tickers per category
+    # 1. Aggressive Small-Cap Tech Stocks
+    allocate_tickers(valid_aggressive_small_caps, allocations['aggressive_small_cap'], "Aggressive Small-Cap Tech Stocks")
+
+    # 2. Top Daily Gainers
+    allocate_tickers(valid_small_cap_gainers, allocations['top_gainers'], "Top Daily Gainers")
+
+    # 3. Stocks Breaking Out of Consolidation
+    allocate_tickers(valid_breakout_stocks, allocations['breakout_stocks'], "Stocks Breaking Out of Consolidation")
+
+    # Final Check
+    if len(final_watchlist) < min_size:
+        additional_needed = min_size - len(final_watchlist)
+        logger.warning(f"After allocation, watchlist has only {len(final_watchlist)} tickers, below the minimum of {min_size}.")
+        logger.info(f"Fetching additional {additional_needed} small-cap tech stocks using EquityQuery to meet the minimum watchlist size...")
+
         try:
+            # Fetch additional Aggressive Small-Cap Tech Stocks
             additional_query = build_aggressive_small_cap_query()
             additional_body = {
                 "offset": len(valid_aggressive_small_caps) + len(valid_small_cap_gainers) + len(valid_breakout_stocks),
-                "size": additional_fill_limit,
+                "size": additional_fill_limit,  # Renamed variable
                 "sortField": "intradaymarketcap",
                 "sortType": "asc",
                 "quoteType": "equity",
@@ -355,35 +420,41 @@ def fetch_watchlist(
                 "userId": "",
                 "userIdType": "guid"
             }
+
             additional_tickers = fetch_tickers(screener, additional_body, additional_fill_limit)
+            valid_additional_small_caps = []
             for sym in additional_tickers:
                 if not validate_ticker(sym):
+                    logger.debug(f"Ticker {sym} excluded due to non-US suffix.")
                     continue
                 try:
                     info = yf.Ticker(sym).info
                     market_cap = info.get("marketCap", 0)
                     if market_cap and market_cap_minimum <= market_cap < market_cap_threshold:
-                        watchlist.add(sym)
+                        valid_additional_small_caps.append(sym)
                         logger.info(f"Added additional small-cap tech: {sym}, Market Cap=${market_cap}")
-                        if len(watchlist) >= min_size:
+                        final_watchlist.add(sym)
+                        if len(final_watchlist) >= min_size:
                             break
                     else:
-                        logger.debug(f"Ticker {sym} skipped; market cap ${market_cap} out of range.")
+                        logger.debug(f"Ticker {sym} does not meet market cap criteria (Market Cap=${market_cap}). Skipping.")
                 except Exception as ee:
                     logger.warning(f"Error fetching info for {sym}: {ee}")
                     continue
-            logger.info(f"After additional fetch, watchlist size: {len(watchlist)}")
-        except Exception as e:
-            logger.error(f"Error fetching additional small-cap tech tickers: {e}")
 
-    if len(watchlist) < min_size:
-        logger.warning(f"Final watchlist has only {len(watchlist)} tickers; proceeding with available stocks.")
+            logger.info(f"Watchlist size after adding additional small-cap tech stocks: {len(final_watchlist)}")
+        except Exception as e:
+            logger.error(f"Error fetching additional small-cap tech tickers using EquityQuery: {e}")
+
+    if len(final_watchlist) < min_size:
+        logger.warning(f"After attempting to add additional stocks, watchlist has {len(final_watchlist)} tickers. Proceeding with available stocks.")
     else:
         logger.info(f"Watchlist meets the minimum size requirement of {min_size} stocks.")
 
-    final_watchlist = list(watchlist)[:min_size]
+    final_watchlist = list(final_watchlist)[:min_size]  # Limit to min_size
     logger.info(f"Final watchlist => Total tickers: {len(final_watchlist)}")
     logger.info(f"Watchlist: {final_watchlist}")
+
     return final_watchlist
 
 ###############################################################################
@@ -392,22 +463,23 @@ def fetch_watchlist(
 def score_watchlist(watchlist: List[str], lookback_days: int = 30) -> pd.DataFrame:
     """
     Score each stock in the watchlist based on momentum.
-    
+
     Parameters:
         watchlist (List[str]): List of stock ticker symbols.
         lookback_days (int): Number of days to look back for scoring.
-    
+
     Returns:
-        pd.DataFrame: DataFrame containing symbols and their momentum scores.
+        pd.DataFrame: DataFrame containing symbols and their scores.
     """
     logger.info("Scoring watchlist based on momentum...")
     scores = []
 
+    # Batch download historical data for efficiency
     try:
-        logger.info("Downloading historical data for tickers...")
+        logger.info("Downloading historical data for all tickers...")
         data = yf.download(
             tickers=watchlist,
-            period="1mo",  # Approximately 30 days
+            period="1mo",  # 1 month to cover approx 30 days
             interval="1d",
             group_by='ticker',
             threads=True,
@@ -419,7 +491,6 @@ def score_watchlist(watchlist: List[str], lookback_days: int = 30) -> pd.DataFra
 
     for sym in watchlist:
         try:
-            # Ensure data exists for the ticker
             if sym not in data.columns.levels[0]:
                 logger.warning(f"No data found for {sym}. Assigning score 0.")
                 scores.append({'Symbol': sym, 'Momentum_Score': 0})
@@ -427,15 +498,18 @@ def score_watchlist(watchlist: List[str], lookback_days: int = 30) -> pd.DataFra
 
             sym_data = data[sym].dropna()
             if sym_data.empty or len(sym_data) < 2:
-                logger.warning(f"Not enough data for {sym}. Assigning score 0.")
+                logger.warning(f"Not enough data to calculate momentum score for {sym}. Assigning score 0.")
                 scores.append({'Symbol': sym, 'Momentum_Score': 0})
                 continue
 
-            # Compute day-over-day changes and count positive changes
+            # Calculate day-over-day changes
             df_diff = sym_data['Close'].diff().dropna()
-            score_value = (df_diff > 0).sum()
-            scores.append({'Symbol': sym, 'Momentum_Score': score_value})
-            logger.info(f"Scored {sym}: {score_value}")
+
+            # Calculate the number of days with positive change
+            score = (df_diff > 0).sum()
+
+            scores.append({'Symbol': sym, 'Momentum_Score': score})
+            logger.info(f"Scored {sym}: {score}")
         except Exception as ee:
             logger.error(f"Error processing {sym}: {ee}")
             scores.append({'Symbol': sym, 'Momentum_Score': 0})
@@ -452,22 +526,23 @@ def score_watchlist(watchlist: List[str], lookback_days: int = 30) -> pd.DataFra
 ###############################################################################
 def filter_watchlist(scored_df: pd.DataFrame, min_size: int = 20) -> pd.DataFrame:
     """
-    Filter the watchlist to retain top tickers based on momentum scores,
-    ensuring the watchlist meets a minimum size.
-    
+    Filter the watchlist to retain the top tickers based on momentum scores,
+    ensuring the watchlist meets the minimum size requirement.
+
     Parameters:
-        scored_df (pd.DataFrame): DataFrame with ticker symbols and scores.
-        min_size (int): Minimum number of tickers required.
-    
+        scored_df (pd.DataFrame): DataFrame containing symbols and their scores.
+        min_size (int): Minimum number of tickers to retain in the watchlist.
+
     Returns:
         pd.DataFrame: Filtered DataFrame.
     """
     logger.info("Filtering watchlist based on momentum scores...")
+
     if scored_df.empty:
-        logger.warning("Scored DataFrame is empty. Returning an empty DataFrame.")
+        logger.warning("Scored DataFrame is empty. Returning empty DataFrame.")
         return scored_df
 
-    # Retain at least half the tickers or the minimum—whichever is greater
+    # Determine the number of tickers to retain
     retain_count = max(min_size, len(scored_df) // 2)
     if retain_count > len(scored_df):
         retain_count = len(scored_df)
@@ -483,18 +558,17 @@ def filter_watchlist(scored_df: pd.DataFrame, min_size: int = 20) -> pd.DataFram
 def main():
     logger.info("=== Starting Momentum Strategy Watchlist Fetching ===")
 
-    # Parameters for watchlist fetch
+    # 1. Build watchlist
     sc_limit = 100
     gainers_limit = 100
     breakout_limit = 50
-    additional_fill_limit = 50
+    additional_fill_limit = 50  # Renamed from equityquery_fill_limit
     min_size = 20
-    market_cap_threshold = 2e9       # Upper threshold: 2B USD
-    market_cap_minimum = 50000000    # Lower threshold: 50M USD
+    market_cap_threshold = 2e9      # 2 billion USD
+    market_cap_minimum = 50000000   # 50 million USD
 
-    # Build watchlist from three categories
     watchlist = fetch_watchlist(
-        smallcap_limit=sc_limit,
+        smallcap_limit=sc_limit, 
         gainers_limit=gainers_limit,
         breakout_limit=breakout_limit,
         additional_fill_limit=additional_fill_limit,
@@ -507,22 +581,26 @@ def main():
         logger.info("No symbols in watchlist. Exiting.")
         return
 
-    # Score the watchlist based on momentum
-    lookback_days = 30  # Look back period in days for momentum scoring
+    # 2. Score watchlist
+    lookback_days = 30  # Number of days to look back for momentum
     scored_df = score_watchlist(watchlist, lookback_days)
+
     if scored_df.empty:
         logger.info("No scores calculated. Exiting.")
         return
 
-    # Filter the watchlist to retain the top tickers
+    # 3. Filter watchlist
     filtered_df = filter_watchlist(scored_df, min_size=min_size)
+
     if filtered_df.empty:
         logger.info("No symbols after filtering. Exiting.")
         return
 
-    # Display and save the final watchlist
+    # 4. Display final watchlist
     logger.info("Final Watchlist after Scoring and Filtering:")
     logger.info(filtered_df.to_string(index=False))
+
+    # Optional: Save to CSV
     try:
         filtered_df.to_csv("final_watchlist.csv", index=False)
         logger.info("Final watchlist saved to 'final_watchlist.csv'.")
