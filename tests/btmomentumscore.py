@@ -64,10 +64,10 @@ class RSIEnhanced(bt.Indicator):
     """
     lines = ('rsi', 'rsi_score',)
     params = (('period', 14),)
-
+    
     def __init__(self):
         self.l.rsi = bt.indicators.RSI_SMA(self.data, period=self.p.period)
-
+    
     def next(self):
         rsi_val = self.l.rsi[0]
         if rsi_val < 25:
@@ -81,7 +81,6 @@ class RSIEnhanced(bt.Indicator):
         else:
             self.l.rsi_score[0] = -2.0
 
-
 class MultiMovingAverageScore(bt.Indicator):
     """
     Checks alignment of short (20), medium (50), and long (200) SMAs.
@@ -90,15 +89,15 @@ class MultiMovingAverageScore(bt.Indicator):
     """
     lines = ('ma_score',)
     params = dict(period_short=20, period_medium=50, period_long=200)
-
+    
     def __init__(self):
         self.sma_short = bt.indicators.SMA(self.data, period=self.p.period_short)
         self.sma_med   = bt.indicators.SMA(self.data, period=self.p.period_medium)
         self.sma_long  = bt.indicators.SMA(self.data, period=self.p.period_long)
-
+    
     def next(self):
         short = self.sma_short[0]
-        med   = self.sma_med[0]
+        med = self.sma_med[0]
         long_ = self.sma_long[0]
         if short > med > long_:
             self.l.ma_score[0] = 2.0
@@ -107,21 +106,19 @@ class MultiMovingAverageScore(bt.Indicator):
         else:
             self.l.ma_score[0] = 0.0
 
-
 class ATRVolatilityScore(bt.Indicator):
     """
     ATR-based scoring.
     Lines:
       - atr: the Average True Range.
-      - atr_score: scoring based on ATR 
-         (e.g., < 0.5 -> -2, 0.8-1.5 -> +2, else 0.7).
+      - atr_score: scoring based on ATR (e.g., < 0.5 -> -2, 0.8-1.5 -> +2, else 0.7).
     """
     lines = ('atr', 'atr_score',)
     params = (('period', 14),)
-
+    
     def __init__(self):
         self.atr_ind = bt.indicators.AverageTrueRange(self.data, period=self.p.period)
-
+    
     def next(self):
         atr_val = self.atr_ind[0]
         self.l.atr[0] = atr_val
@@ -134,7 +131,6 @@ class ATRVolatilityScore(bt.Indicator):
         else:
             self.l.atr_score[0] = 0.7
 
-
 class SectorDayChange(bt.Indicator):
     """
     Returns today's sector daily change.
@@ -142,11 +138,10 @@ class SectorDayChange(bt.Indicator):
       - sector_day_change: +1.5 if today's close ≥ yesterday's, else 0.
     """
     lines = ('sector_day_change',)
-
+    
     def __init__(self, sector_data=None):
-        # Allow a default; if not provided, use self.data.
         self.sector_data = sector_data if sector_data is not None else self.data
-
+    
     def next(self):
         if len(self.sector_data) < 2:
             self.l.sector_day_change[0] = 0.0
@@ -156,7 +151,6 @@ class SectorDayChange(bt.Indicator):
         change = (close0 - close1) / close1 if close1 != 0 else 0
         self.l.sector_day_change[0] = 1.5 if change >= 0 else 0.0
 
-
 class SectorPerformanceFactor(bt.Indicator):
     """
     Measures long-term sector performance.
@@ -164,27 +158,25 @@ class SectorPerformanceFactor(bt.Indicator):
       - sector_score: Weighted between -2.0 and +2.0 (based on a ±5% change).
     """
     lines = ('sector_score',)
-
+    
     def __init__(self, sector_data=None):
         self.sector_data = sector_data if sector_data is not None else self.data
-
+        self.initial = None
+    
     def next(self):
-        if len(self.sector_data) < 2:
+        if self.initial is None and not np.isnan(self.sector_data.close[0]):
+            self.initial = self.sector_data.close[0]
+        if self.initial is None or self.initial <= 0:
             self.l.sector_score[0] = 0.0
             return
-        first_close = self.sector_data.close.get(0, default=1)
-        curr_close  = self.sector_data.close[0]
-        if first_close <= 0:
-            self.l.sector_score[0] = 0.0
-            return
-        perf = (curr_close - first_close) / first_close
+        curr_close = self.sector_data.close[0]
+        perf = (curr_close - self.initial) / self.initial
         if perf >= 0.05:
             self.l.sector_score[0] = 2.0
         elif perf <= -0.05:
             self.l.sector_score[0] = -2.0
         else:
             self.l.sector_score[0] = (perf / 0.05) * 2.0
-
 
 class MACDSlopeOrHist(bt.Indicator):
     """
@@ -194,7 +186,7 @@ class MACDSlopeOrHist(bt.Indicator):
     """
     lines = ('macd_ok',)
     params = dict(fast=12, slow=26, signal=9)
-
+    
     def __init__(self):
         self.macd = bt.indicators.MACDHisto(
             self.data,
@@ -202,10 +194,9 @@ class MACDSlopeOrHist(bt.Indicator):
             period_me2=self.p.slow,
             period_signal=self.p.signal
         )
-
+    
     def next(self):
         self.l.macd_ok[0] = 1.0 if self.macd.histo[0] > 0 else 0.0
-
 
 class FinalScore(bt.Indicator):
     """
@@ -221,14 +212,14 @@ class FinalScore(bt.Indicator):
     params = dict(
         w_rsi=1.5, w_atr=1.0, w_ma=1.5, w_sector_perf=1.5, w_sector_day=1.0
     )
-
+    
     def __init__(self, rsi_ind, atr_ind, ma_ind, sector_perf, sector_day):
         self.rsi_ind = rsi_ind
         self.atr_ind = atr_ind
         self.ma_ind = ma_ind
         self.sector_perf = sector_perf
         self.sector_day = sector_day
-
+    
     def next(self):
         rsi_sc      = self.rsi_ind.rsi_score[0]
         atr_sc      = self.atr_ind.atr_score[0]
@@ -260,18 +251,22 @@ class MomentumScoringStrategy(bt.Strategy):
         atr_trail_multiplier=1.5,
         fast_ma=12,
         slow_ma=26,
-        signal_ma=9
+        signal_ma=9,
+        debug=True  # Enable extra debug logging
     )
-
-    def logdata(self):
+    
+    def logdata(self, extra=""):
         dt = self.datas[0].datetime.date(0).isoformat()
         price = self.datas[0].close[0]
         score = self.final_score[0]
-        logger.info(f"{dt} Price={price:.2f} Score={score:.2f}")
-
+        logger.info(f"{dt} Price={price:.2f} Score={score:.2f} {extra}")
+    
     def __init__(self):
         if len(self.datas) < 2:
             raise ValueError("Two data feeds required: primary symbol and sector ETF.")
+        # Use 200 bars as the warm-up period
+        self.minbars = 200
+        
         # Primary data indicators
         self.rsi_enh  = RSIEnhanced(self.datas[0], period=14)
         self.atr_sc   = ATRVolatilityScore(self.datas[0], period=14)
@@ -302,7 +297,7 @@ class MomentumScoringStrategy(bt.Strategy):
         self.atr_val = bt.indicators.ATR(self.datas[0], period=14)
         self.order = None
         self.stop_price = None
-
+    
     def notify_order(self, order):
         if order.status in [order.Submitted, order.Accepted]:
             return
@@ -316,17 +311,42 @@ class MomentumScoringStrategy(bt.Strategy):
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             logger.warning('Order Canceled/Margin/Rejected')
         self.order = None
-
+    
     def notify_trade(self, trade):
         if trade.isclosed:
             logger.info(f"OPERATION PROFIT, GROSS {trade.pnl:.2f}")
-
+    
     def next(self):
-        self.logdata()
+        # Only process if warm-up is met
+        if len(self.datas[0]) < self.minbars:
+            return
+        
+        price = self.datas[0].close[0]
+        score = self.final_score[0]
+        
+        # Log current values (even if NaN)
+        extra_debug = ""
+        if self.p.debug:
+            extra_debug = (
+                f"RSI_Score={self.rsi_enh.rsi_score[0]:.2f}, "
+                f"MA_Score={self.ma_sc.ma_score[0]:.2f}, "
+                f"ATR_Score={self.atr_sc.atr_score[0]:.2f}, "
+                f"Sector_Score={self.sector_perf.sector_score[0]:.2f}, "
+                f"Sector_Day={self.sector_day.sector_day_change[0]:.2f}, "
+                f"MACD_OK={self.macd_check.macd_ok[0]:.2f}, "
+                f"Crossover={self.crossover[0]:.2f}"
+            )
+        self.logdata(extra_debug)
+        
+        # Only trade if price and score are valid
+        if np.isnan(price) or np.isnan(score):
+            return
+        
         if self.order:
             return
+        
         pos = self.getposition(self.datas[0])
-        # Update trailing stop if already in position
+        # Update trailing stop if in position
         if pos and pos.size > 0:
             cur_stop = self.datas[0].close[0] - self.p.atr_trail_multiplier * self.atr_val[0]
             if cur_stop > self.stop_price:
@@ -335,14 +355,15 @@ class MomentumScoringStrategy(bt.Strategy):
                 logger.info(f"Trigger SELL due to trailing stop: close={self.datas[0].close[0]:.2f}, stop={self.stop_price:.2f}")
                 self.order = self.sell()
                 return
-        # Check entry conditions: final score, MACD bullish, and positive crossover signal.
+        
+        # Check entry conditions: final score, MACD bullish, and positive SMA crossover.
         final_val = self.final_score[0]
-        macd_ok   = (self.macd_check[0] > 0)
+        macd_ok = (self.macd_check.macd_ok[0] > 0)
         crossover_ok = (self.crossover[0] > 0)
         if not pos and final_val >= self.p.buy_score_threshold and macd_ok and crossover_ok:
-            logger.info(f"Placing BUY order. Score={final_val:.2f}, macd_ok={macd_ok}, crossover_ok={crossover_ok}")
+            logger.info(f"Placing BUY order. Score={final_val:.2f}, MACD_OK={macd_ok}, Crossover={crossover_ok}")
             self.order = self.buy()
-
+    
     def stop(self):
         logger.info("Strategy ending Value: %.2f" % self.broker.getvalue())
 
@@ -350,9 +371,30 @@ class MomentumScoringStrategy(bt.Strategy):
 #                           DATA PROCESSING HELPER                            #
 ###############################################################################
 def flatten_df_columns(df):
+    # Ensure the index is a proper DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception as e:
+            logger.error(f"Error converting index to datetime: {e}")
+    # Process column names (do not reset the index)
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = ['_'.join(col).strip() for col in df.columns.values]
-    df.columns = df.columns.str.lower()
+        df.columns = ['_'.join([str(el) for el in col]).strip() for col in df.columns.values]
+    else:
+        df.columns = df.columns.str.lower()
+    # Rename any column named "date" to "datetime" if present (but leave index intact)
+    if "date" in df.columns:
+        df.rename(columns={"date": "datetime"}, inplace=True)
+    # Force numeric conversion on OHLC and volume columns
+    for col in ["open", "high", "low", "close", "adj close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Use original "close" column if it contains valid data;
+    # otherwise, if "adj close" is available and valid, use it.
+    if "close" in df.columns and not df["close"].isna().all():
+        pass
+    elif "adj close" in df.columns and not df["adj close"].isna().all():
+        df["close"] = df["adj close"]
     return df
 
 ###############################################################################
@@ -378,10 +420,8 @@ def run_backtest(tickers=None, sector_symbol="XLK", start=None, end=None,
     
     # Determine the interval and timeframe
     if intraday:
-        # Default to 15m if not overridden:
         interval = interval_override if interval_override else "15m"
         timeframe = bt.TimeFrame.Minutes
-        # Set compression based on interval
         if interval == "15m":
             compression = 15
             max_days = 60
@@ -389,13 +429,11 @@ def run_backtest(tickers=None, sector_symbol="XLK", start=None, end=None,
             compression = 60
             max_days = 730
         else:
-            # fallback to daily
             interval = "1d"
             timeframe = bt.TimeFrame.Days
             compression = 1
             max_days = None
-        
-        # If the requested start date is too old, adjust it
+
         if max_days is not None:
             today = datetime.now()
             allowed_start = today - timedelta(days=max_days)
@@ -412,6 +450,7 @@ def run_backtest(tickers=None, sector_symbol="XLK", start=None, end=None,
     if df_main.empty:
         logger.error("Main symbol data is empty. Exiting.")
         return
+    # Keep the DatetimeIndex intact.
     df_main = flatten_df_columns(df_main)
     logger.info(f"Downloaded {len(df_main)} rows for {main_symbol}")
 
@@ -424,25 +463,25 @@ def run_backtest(tickers=None, sector_symbol="XLK", start=None, end=None,
     logger.info(f"Downloaded {len(df_sector)} rows for {sector_symbol}")
 
     cerebro = bt.Cerebro()
-    cerebro.addstrategy(MomentumScoringStrategy)
+    cerebro.addstrategy(MomentumScoringStrategy, debug=True)
     cerebro.broker.setcash(cash)
     cerebro.broker.setcommission(commission=0.001)
-    
+
     data_main = bt.feeds.PandasData(
-        dataname=df_main, 
+        dataname=df_main,
         name=main_symbol,
         timeframe=timeframe,
         compression=compression
     )
     data_sector = bt.feeds.PandasData(
-        dataname=df_sector, 
+        dataname=df_sector,
         name=sector_symbol,
         timeframe=timeframe,
         compression=compression
     )
     cerebro.adddata(data_main)    # datas[0]
     cerebro.adddata(data_sector)  # datas[1]
-
+    
     logger.info("Starting backtest ...")
     results = cerebro.run()
     final_val = cerebro.broker.getvalue()
@@ -454,13 +493,13 @@ def run_backtest(tickers=None, sector_symbol="XLK", start=None, end=None,
 def main():
     logger.info("=== Starting Momentum Strategy with Backtrader ===")
     run_backtest(
-        tickers=["KOPN"],
+        tickers=["TSLA"],  # Use TSLA as an example ticker
         sector_symbol="XLK",
-        start=datetime(2024, 11, 15),
+        start=datetime(2023, 1, 15),
         end=datetime(2025, 1, 9),
         cash=50000.0,
-        intraday=True,         # Set to True for intraday data
-        interval_override="15m"  # Change to "1h" if desired (keeping in mind restrictions)
+        intraday=True,
+        interval_override="1h"
     )
     logger.info("=== Strategy Completed ===")
 

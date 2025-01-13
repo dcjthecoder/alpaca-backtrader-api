@@ -44,15 +44,6 @@ file_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
-# Load environment variables from env.txt
-load_dotenv("env.txt")
-APCA_API_KEY_ID = os.getenv("APCA_API_KEY_ID")
-APCA_API_SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
-
-if not APCA_API_KEY_ID or not APCA_API_SECRET_KEY:
-    logger.error("Alpaca API keys are missing in env.txt. Exiting.")
-    sys.exit()
-
 ###############################################################################
 #                         WATCHLIST FETCHING LOGIC                             #
 ###############################################################################
@@ -197,7 +188,7 @@ def fetch_watchlist(
     gainers_limit: int = 100,
     breakout_limit: int = 50,
     additional_fill_limit: int = 50,  # Renamed from equityquery_fill_limit
-    min_size: int = 20,
+    min_size: int = 200,
     market_cap_threshold: float = 2e9,    # 2 billion USD
     market_cap_minimum: float = 50000000  # 50 million USD
 ) -> List[str]:
