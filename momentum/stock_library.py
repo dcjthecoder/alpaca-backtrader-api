@@ -28,7 +28,7 @@ LOG_FILE = "log_stock_library.log"
 from logging.handlers import RotatingFileHandler
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Set to DEBUG to see detailed messages
+logger.setLevel(logging.DEBUG)  # DEBUG level for detailed messages
 
 # Create handlers
 console_handler = logging.StreamHandler(sys.stdout)
@@ -42,6 +42,10 @@ file_handler.setFormatter(formatter)
 # Add handlers to logger
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+# Load environment variables from env.txt if present
+load_dotenv("env.txt")
+# (No Alpaca keys are used; they are ignored if present)
 
 ###############################################################################
 #                        QUERY CONSTRUCTION FUNCTIONS                         #
@@ -60,10 +64,10 @@ def build_small_cap_query(lower_bound: float, upper_bound: float) -> dict:
             'operator': 'and',
             'operands': [sector_eq, region_eq, market_cap_gt, market_cap_lt, avg_vol_gt]
         }
-        logger.debug(f"Built small cap query for range {lower_bound}-{upper_bound}")
+        logger.debug(f"Built small cap query for range ${lower_bound} - ${upper_bound}")
         return query
     except Exception as e:
-        logger.error(f"Error constructing small cap query ({lower_bound}-{upper_bound}): {e}")
+        logger.error(f"Error constructing small cap query (${lower_bound}-${upper_bound}): {e}")
         sys.exit(1)
 
 def build_low_volatility_query(lower_bound: float, upper_bound: float, volatility_threshold: float = 20) -> dict:
@@ -74,7 +78,7 @@ def build_low_volatility_query(lower_bound: float, upper_bound: float, volatilit
         base_query = build_small_cap_query(lower_bound, upper_bound)
         low_vol = {'operator': 'lt', 'operands': ['historicalvolatility', volatility_threshold]}
         base_query['operands'].append(low_vol)
-        logger.debug(f"Built low volatility query with volatility threshold {volatility_threshold} for range {lower_bound}-{upper_bound}")
+        logger.debug(f"Built low volatility query with threshold {volatility_threshold} for range ${lower_bound}-${upper_bound}")
         return base_query
     except Exception as e:
         logger.error(f"Error constructing low volatility query: {e}")
@@ -87,10 +91,11 @@ def build_high_volume_query(lower_bound: float, upper_bound: float, volume_thres
     try:
         base_query = build_small_cap_query(lower_bound, upper_bound)
         high_vol = {'operator': 'gt', 'operands': ['avgdailyvol3m', volume_threshold]}
+        # Replace the default avg_vol condition (100,000) with the higher threshold.
         operands = [op for op in base_query['operands'] if not (op.get('operands') and op['operands'][1] == 100000)]
         operands.append(high_vol)
         base_query['operands'] = operands
-        logger.debug(f"Built high volume query with volume threshold {volume_threshold} for range {lower_bound}-{upper_bound}")
+        logger.debug(f"Built high volume query with threshold {volume_threshold} for range ${lower_bound}-${upper_bound}")
         return base_query
     except Exception as e:
         logger.error(f"Error constructing high volume query: {e}")
@@ -127,21 +132,21 @@ def fetch_tickers_for_query(query: dict, fetch_size: int = 249) -> List[str]:
         logger.error(f"Error fetching tickers with query: {e}")
         return []
 
-def has_historical_data(ticker: str, start_date: str = "2020-01-01") -> bool:
+def has_historical_data(ticker: str, start_date: str = "2019-01-01") -> bool:
     """
-    Checks if the given ticker has historical data from start_date to present.
+    Checks whether the data downloaded for the ticker is not empty.
     """
     try:
-        logger.debug(f"Checking historical data for {ticker} starting from {start_date}...")
+        logger.debug(f"Downloading historical data for {ticker} from {start_date}...")
         df = yf.download(ticker, start=start_date, progress=False)
         if df.empty:
-            logger.debug(f"No historical data for {ticker}.")
+            logger.debug(f"No historical data found for {ticker}.")
             return False
-        first_date = df.index.min().date()
-        required_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-        if first_date > required_date:
-            logger.debug(f"{ticker} does not have data as early as {start_date}.")
+        # Additionally, check that we have a minimum number of data points (e.g. 250).
+        if len(df) < 250:
+            logger.debug(f"Ticker {ticker} has insufficient data points ({len(df)}) since {start_date}.")
             return False
+        logger.debug(f"Historical data for {ticker} downloaded successfully with {len(df)} data points.")
         return True
     except Exception as e:
         logger.error(f"Error fetching historical data for {ticker}: {e}")
@@ -157,67 +162,69 @@ def build_stock_library(
     market_cap_minimum: float = 50000000
 ) -> List[str]:
     """
-    Builds a library of US Small Cap Tech stocks that have historical data from 1/1/2019,
-    and whose price has changed by at least 10% since that date.
+    Builds a library of US Small Cap Tech stocks meeting the criteria.
     
-    The library is built by iterating over several queries:
-      - Lower small cap stocks (50M to 500M)
-      - Mid-range small cap stocks (500M to 1B)
-      - Upper small cap stocks (1B to 2B)
-      - Low volatility variant over the whole range (50M to 2B)
-      - High volume variant over the whole range (50M to 2B, vol > 200K)
+    The library is built by iterating over these queries:
+      1. Lower small cap (50M to 500M)
+      2. Mid small cap (500M to 1B)
+      3. Upper small cap (1B to 2B)
+      4. Low volatility variant over (50M to 2B)
+      5. High volume variant over (50M to 2B, volume > 200K)
     """
-    library = set()  # use a set for uniqueness
-    queries = []
+    library = set()  # Using a set for uniqueness
+    queries = [
+        build_small_cap_query(50000000, 500000000),     # lower small cap
+        build_small_cap_query(500000000, 1000000000),    # mid small cap
+        build_small_cap_query(1000000000, 2000000000),   # upper small cap
+    #    build_low_volatility_query(50000000, 2000000000, volatility_threshold=20),
+        build_high_volume_query(50000000, 2000000000, volume_threshold=200000)
+    ]
     
-    queries.append(build_small_cap_query(50000000, 500000000))     # lower small cap
-    queries.append(build_small_cap_query(500000000, 1000000000))     # mid small cap
-    queries.append(build_small_cap_query(1000000000, 2000000000))    # upper small cap
-    queries.append(build_low_volatility_query(50000000, 2000000000, volatility_threshold=20))
-    queries.append(build_high_volume_query(50000000, 2000000000, volume_threshold=200000))
-    
+    # Non-US suffixes to filter out tickers.
     non_us_suffixes = [
-        ".AR", ".AT", ".AU", ".BE", ".BR", ".CA", ".CH", ".CL", ".CN", ".CZ", 
-        ".DE", ".DK", ".EE", ".EG", ".ES", ".FI", ".FR", ".GB", ".GR", ".HK", 
-        ".HU", ".ID", ".IE", ".IL", ".IN", ".IS", ".IT", ".JP", ".KR", ".KW", 
-        ".LK", ".LT", ".LV", ".MX", ".MY", ".NL", ".NO", ".NZ", ".PE", ".PH", 
-        ".PK", ".PL", ".PT", ".QA", ".RO", ".RU", ".SA", ".SE", ".SG", ".SR", 
+        ".AR", ".AT", ".AU", ".BE", ".BR", ".CA", ".CH", ".CL", ".CN", ".CZ",
+        ".DE", ".DK", ".EE", ".EG", ".ES", ".FI", ".FR", ".GB", ".GR", ".HK",
+        ".HU", ".ID", ".IE", ".IL", ".IN", ".IS", ".IT", ".JP", ".KR", ".KW",
+        ".LK", ".LT", ".LV", ".MX", ".MY", ".NL", ".NO", ".NZ", ".PE", ".PH",
+        ".PK", ".PL", ".PT", ".QA", ".RO", ".RU", ".SA", ".SE", ".SG", ".SR",
         ".TH", ".TR", ".TW", ".VE", ".VN", ".ZA", ".OL", ".PA"
     ]
     
-    for query in queries:
-        logger.info("Processing query variant...")
+    for idx, query in enumerate(queries, 1):
+        logger.info(f"Processing query variant {idx}/{len(queries)}...")
         tickers = fetch_tickers_for_query(query, fetch_size=fetch_size)
-        logger.info(f"Fetched {len(tickers)} tickers for this query variant.")
+        logger.info(f"Fetched {len(tickers)} tickers for query variant {idx}.")
+        
         for sym in tickers:
-            # Validate ticker: check for non-US suffixes.
-            rejected = False
-            for suf in non_us_suffixes:
-                if sym.upper().endswith(suf):
-                    logger.debug(f"Ticker {sym} rejected due to foreign suffix {suf}.")
-                    rejected = True
-                    break
-            if rejected:
+            # Reject tickers with foreign suffixes.
+            if any(sym.upper().endswith(suf) for suf in non_us_suffixes):
+                logger.debug(f"Ticker {sym} rejected due to foreign suffix.")
                 continue
             
             try:
                 ticker_obj = yf.Ticker(sym)
                 info = ticker_obj.info
                 market_cap = info.get("marketCap", 0)
-                if not market_cap or not (market_cap_minimum <= market_cap < market_cap_threshold):
+                if not market_cap:
+                    logger.debug(f"Ticker {sym} rejected: market cap information missing.")
+                    continue
+                if not (market_cap_minimum <= market_cap < market_cap_threshold):
                     logger.debug(f"Ticker {sym} rejected: market cap ${market_cap} out of range.")
                     continue
 
-                if not has_historical_data(sym, start_date="2022-01-01"):
+                if not has_historical_data(sym, start_date="2019-01-01"):
                     logger.debug(f"Ticker {sym} rejected: inadequate historical data.")
                     continue
 
-                df = yf.download(sym, start="2022-01-01", progress=False)
+                # Check for significant price change (minimum 10% change).
+                df = yf.download(sym, start="2019-01-01", progress=False)
                 if df.empty:
                     logger.debug(f"Ticker {sym} rejected: historical data download returned empty DataFrame.")
                     continue
-                start_price = df['Close'].iloc[0]
-                current_price = df['Close'].iloc[-1]
+                # Ensure the 'Close' column is a Series by squeezing.
+                close_series = df['Close'].squeeze()
+                start_price = float(close_series.iloc[0])
+                current_price = float(close_series.iloc[-1])
                 pct_change = (current_price - start_price) / start_price
                 if abs(pct_change) < 0.10:
                     logger.debug(f"Ticker {sym} rejected: price change {pct_change*100:.2f}% is below 10%.")
@@ -231,10 +238,10 @@ def build_stock_library(
             except Exception as ee:
                 logger.warning(f"Error processing ticker {sym}: {ee}")
                 continue
-
+        
         if len(library) >= desired_count:
             break
-
+    
     if len(library) < desired_count:
         logger.warning(f"Only found {len(library)} tickers meeting criteria (desired {desired_count}).")
     else:

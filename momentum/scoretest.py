@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-scoretest_refactored.py
+scoretest.py
 
 Refactored script incorporating adaptive, normalized, and percentile-based scoring
 for multiple technical indicators.
@@ -617,16 +617,7 @@ def main(backtest_mode: bool = True):
         logger.info("Running BACKTEST mode...")
         start_date = datetime(2020, 1, 1)
         end_date = datetime(2024, 1, 1)
-        my_weights = {
-            'rsi': 0.8,           # Strong contribution to PNL and reliable signal for momentum.
-            'rsi_std': 0.5,       # Useful for stability, but less direct impact on PNL.
-            'macd': 1.5,          # Highly correlated with PNL; key momentum indicator.
-            'atr_filter': 0.7,    # Helps capture volatility-adjusted entry/exit, aiding win rate.
-            'sector': 1.2,        # Significant contribution to PNL; ensures sector alignment.
-            'rvol': 1.1,          # Plays a role in liquidity and trade reliability.
-            'multi_ma': 1.3,      # Strong influence on trend-following and PNL.
-            'crossover': 1.0      # High impact on trend identification and trade timing.
-        }
+        my_weights = {"rsi": 0.14778868854045868, "rsi_std": 0.11519519984722137, "macd": 0.1855209320783615, "atr_filter": 0.10873917490243912, "sector": 0.1176842674612999, "rvol": 0.10129396617412567, "multi_ma": 0.0903923287987709, "crossover": 0.13338537514209747}
         trades = backtest_strategy(
             selected_tickers,
             start_date,
