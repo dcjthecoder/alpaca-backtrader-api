@@ -143,7 +143,7 @@ def has_historical_data(ticker: str, start_date: str = "2019-01-01") -> bool:
             logger.debug(f"No historical data found for {ticker}.")
             return False
         # Additionally, check that we have a minimum number of data points (e.g. 250).
-        if len(df) < 250:
+        if len(df) < 1000:
             logger.debug(f"Ticker {ticker} has insufficient data points ({len(df)}) since {start_date}.")
             return False
         logger.debug(f"Historical data for {ticker} downloaded successfully with {len(df)} data points.")
@@ -156,7 +156,7 @@ def has_historical_data(ticker: str, start_date: str = "2019-01-01") -> bool:
 #                         BUILD STOCK LIBRARY                               #
 ###############################################################################
 def build_stock_library(
-    desired_count: int = 500,
+    desired_count: int = 700,
     fetch_size: int = 249,
     market_cap_threshold: float = 2e9,
     market_cap_minimum: float = 50000000
@@ -176,8 +176,7 @@ def build_stock_library(
         build_small_cap_query(50000000, 500000000),     # lower small cap
         build_small_cap_query(500000000, 1000000000),    # mid small cap
         build_small_cap_query(1000000000, 2000000000),   # upper small cap
-    #    build_low_volatility_query(50000000, 2000000000, volatility_threshold=20),
-        build_high_volume_query(50000000, 2000000000, volume_threshold=200000)
+        build_low_volatility_query(50000000, 2000000000, volatility_threshold=200),
     ]
     
     # Non-US suffixes to filter out tickers.
@@ -226,8 +225,8 @@ def build_stock_library(
                 start_price = float(close_series.iloc[0])
                 current_price = float(close_series.iloc[-1])
                 pct_change = (current_price - start_price) / start_price
-                if abs(pct_change) < 0.10:
-                    logger.debug(f"Ticker {sym} rejected: price change {pct_change*100:.2f}% is below 10%.")
+                if abs(pct_change) < 0.05:
+                    logger.debug(f"Ticker {sym} rejected: price change {pct_change*100:.2f}% is below 5%.")
                     continue
 
                 library.add(sym)
@@ -255,7 +254,7 @@ def build_stock_library(
 def main():
     logger.info("=== Building Stock Library for US Small Cap Tech Stocks ===")
     
-    desired_count = 500
+    desired_count = 700
     fetch_size = 249  # number of tickers to try fetching per query variant
     
     stock_library = build_stock_library(desired_count=desired_count, fetch_size=fetch_size)
