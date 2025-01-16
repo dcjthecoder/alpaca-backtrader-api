@@ -149,54 +149,18 @@ def compute_rsi_score(
 
     return float(score)
 
-def compute_rsi_std_score(
-    rsi_series: pd.Series,
-    window: int = 14,
-    lookback: int = 60,
-    market_trend: float = 0.0
-) -> float:
-    """
-    Compute a score based on the current RSI standard deviation compared to its historical distribution,
-    adjusted for market trend.
-
-    Parameters:
-        rsi_series (pd.Series): Series of RSI values.
-        window (int): Window size for computing rolling standard deviation (default: 14).
-        lookback (int): Lookback period for historical comparisons (default: 60).
-        market_trend (float): Trend indicator, where positive values suggest bullish conditions and
-                              negative values suggest bearish conditions (default: 0.0).
-
-    Returns:
-        float: A score between 0.0 and 1.0 indicating the relevance of RSI standard deviation.
-    """
-    # Ensure sufficient data
-    if len(rsi_series) < max(window, lookback):
+def compute_rsi_std_score(rsi_series: pd.Series, window=14, lookback=60, market_trend=0.0) -> float:
+    if len(rsi_series) < window:
         return 0.5
-
-    # Calculate current RSI standard deviation
     curr_std = rsi_series.rolling(window).std().iloc[-1]
     if pd.isna(curr_std):
         return 0.5
-
-    # Historical rolling standard deviation over the lookback window
     hist_window = min(lookback, len(rsi_series) - window + 1)
-    historical_std = rsi_series.rolling(window).std().iloc[-hist_window:]
-
-    # Compute weighted percentile rank
-    weights = np.linspace(1, 2, len(historical_std))  # Recent data weighted more heavily
-    weighted_hist = np.dot(historical_std < curr_std, weights) / np.sum(weights)
-    percentile_rank = weighted_hist
-
-    # Base score: 1.0 - percentile rank
-    base_score = 1.0 - percentile_rank
-
-    # Adjust based on market trend
-    trend_adjustment = np.tanh(market_trend * 0.5)  # Smooth the market trend adjustment
-    adjusted_score = base_score + trend_adjustment * 0.2
-
-    # Ensure score is within [0.0, 1.0]
-    score = float(np.clip(adjusted_score, 0.0, 1.0))
-
+    historical = rsi_series.rolling(window).std().iloc[-hist_window:]
+    # Use .all() or .any() if checking boolean conditions
+    pr = (historical < curr_std).mean()
+    score = 1.0 - pr
+    score = float(np.clip(score + 0.2 * market_trend, 0.0, 1.0))
     return score
 
 def compute_macd_score(prices: pd.Series, historical_macd_hist: Optional[pd.Series] = None) -> float:
@@ -231,67 +195,20 @@ def compute_atr(df: pd.DataFrame, period=14) -> pd.Series:
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-def compute_atr_filter_score(
-    df: pd.DataFrame, 
-    atr_series: pd.Series, 
-    historical_atr: Optional[pd.Series] = None,
-    price_column: str = "Close",
-    lookback: int = 20
-) -> float:
-    """
-    Enhanced ATR Filter Score for Momentum Strategies.
-
-    Args:
-        df (pd.DataFrame): DataFrame containing price data.
-        atr_series (pd.Series): Series of ATR values.
-        historical_atr (pd.Series, optional): Historical ATR values for percentile calculation.
-        price_column (str): Column name for price data (default: "Close").
-        lookback (int): Lookback period for calculating dynamic thresholds.
-
-    Returns:
-        float: A score between 0 and 1 indicating the ATR's favorability.
-    """
-    if atr_series.empty or price_column not in df.columns:
-        return 0.5  # Neutral score if data is missing
-
+def compute_atr_filter_score(df: pd.DataFrame, atr_series: pd.Series, historical_atr: Optional[pd.Series] = None) -> float:
+    if len(atr_series) == 0:
+        return 0.5
     curr_atr = atr_series.iloc[-1]
-    curr_price = df[price_column].iloc[-1]
-    if pd.isna(curr_atr) or pd.isna(curr_price) or curr_price == 0:
-        return 0.5  # Neutral score if data is invalid
-
-    # Calculate relative ATR (scale-independent)
-    rel_atr = curr_atr / curr_price
-
-    # Compute dynamic thresholds from historical ATR
-    if historical_atr is not None and len(historical_atr) > lookback:
-        mean_atr = historical_atr.rolling(window=lookback).mean().iloc[-1]
-        std_atr = historical_atr.rolling(window=lookback).std().iloc[-1]
-        if pd.isna(mean_atr) or pd.isna(std_atr) or std_atr == 0:
-            return 0.5  # Neutral if thresholds can't be calculated
-
-        low_threshold = mean_atr - std_atr
-        high_threshold = mean_atr + std_atr
-        extreme_threshold = mean_atr + 2 * std_atr
-
-        # Granular scoring based on thresholds
-        if curr_atr < low_threshold:
-            score = 0.8  # Low volatility, favorable for momentum
-        elif curr_atr < high_threshold:
-            score = 1.0  # Moderate volatility, ideal for momentum
-        elif curr_atr < extreme_threshold:
-            score = 0.5  # High volatility, mixed signal
-        else:
-            score = 0.2  # Extreme volatility, unfavorable
+    if historical_atr is not None and len(historical_atr) > 10:
+        pct_rank = compute_percentile_rank(historical_atr, curr_atr)
+        return 1.0 - pct_rank
     else:
-        # Fallback thresholds if historical ATR is unavailable
-        if rel_atr < 0.01:  # ATR less than 1% of price
-            score = 0.8
-        elif rel_atr > 0.05:  # ATR greater than 5% of price
-            score = 0.2
+        if curr_atr < 1.0:
+            return 0.8
+        elif curr_atr > 5.0:
+            return 0.2
         else:
-            score = 0.5
-
-    return float(np.clip(score, 0.0, 1.0))
+            return 0.5
 
 def compute_multi_ma_score(df: pd.DataFrame, ma_periods=[20, 50, 200], lookback=20) -> float:
     """
@@ -961,11 +878,15 @@ def iterative_optimization(
     min_lr: float = 1e-6
 ):
     """
-    1) Iteratively optimize a trading strategy with dynamic learning rate adjustments.
-       Enhanced with:
-       - Exponential decay of learning rate.
-       - Sharpe-based plateau adjustments.
-       - Trend and volatility analysis for more robust updates.
+    Iteratively optimize a trading strategy with dynamic learning rate adjustments,
+    training the neural network on backtested trades, and updating indicator weights.
+    
+    Enhancements include:
+      - Exponential decay of learning rate.
+      - Sharpe-based plateau adjustments.
+      - Trend and volatility analysis for robust updates.
+      - Neural network training with trade outcomes.
+      - Extraction and update of indicator weights from the model.
     """
     try:
         stock_lib = pd.read_csv(stock_library_csv)
@@ -1014,9 +935,14 @@ def iterative_optimization(
 
     sharpe_history = []
 
+    # Define the feature order for training.
+    # Note: The keys below match those used when logging trades.
+    feature_order = ['rsi', 'rsi_std', 'macd', 'atr_filter', 'sector', 'rvol', 'multi_ma', 'crossover']
+
     for itx in range(1, iterations + 1):
         logger.info(f"\n=== Iteration {itx} ===")
 
+        # Select random training/validation date ranges.
         start_date = random.choice(possible_dates)
         train_start, train_end = start_date, start_date + pd.DateOffset(months=12)
         val_start, val_end = train_end + pd.Timedelta(days=1), train_end + pd.DateOffset(months=6)
@@ -1031,18 +957,21 @@ def iterative_optimization(
         if len(tickers_chosen) < 10:
             logger.warning(f"Only {len(tickers_chosen)} valid tickers found after replacements. Proceeding.")
 
+        # Run backtests on training data.
         train_trades = backtest_strategy(
             tickers_chosen, train_start, train_end, sector_etf="XLK", compare_index_etf="SPY",
             volatility_threshold=1.0, buy_score_threshold=0.7, account_balance=50000.0,
             allocation_pct=0.07, stop_loss_multiplier=1.5, profit_target_multiplier=3.0, weights_dict=base_weights
         )
         if not train_trades:
-            logger.info("No trades or no valid data => skip iteration.")
+            logger.info("No trades or no valid data in training period => skip iteration.")
             with open(META_LOG_FILE, "a") as f:
                 f.write(f"Iteration {itx}, TRAIN => No trades\n")
             continue
 
         total_pnl_train, wr_train, sr_train, dd_train = summarize_trades(train_trades, 50000.0)
+
+        # Run validation backtest.
         val_trades = backtest_strategy(
             tickers_chosen, val_start, val_end, sector_etf="XLK", compare_index_etf="SPY",
             volatility_threshold=1.0, buy_score_threshold=0.7, account_balance=50000.0,
@@ -1052,8 +981,10 @@ def iterative_optimization(
         total_pnl_val, wr_val, sr_val, dd_val = summarize_trades(val_trades, 50000.0)
         sharpe_history.append(sr_val)
 
-        log_msg_train = f"Iteration {itx}, TRAIN => PnL={total_pnl_train:.2f}, WinRate={wr_train*100:.2f}%, Sharpe={sr_train:.3f}, Drawdown={dd_train*100:.2f}%\n"
-        log_msg_val = f"Iteration {itx}, VALID => PnL={total_pnl_val:.2f}, WinRate={wr_val*100:.2f}%, Sharpe={sr_val:.3f}, Drawdown={dd_val*100:.2f}%\n"
+        log_msg_train = (f"Iteration {itx}, TRAIN => PnL={total_pnl_train:.2f}, "
+                         f"WinRate={wr_train*100:.2f}%, Sharpe={sr_train:.3f}, Drawdown={dd_train*100:.2f}%\n")
+        log_msg_val = (f"Iteration {itx}, VALID => PnL={total_pnl_val:.2f}, "
+                       f"WinRate={wr_val*100:.2f}%, Sharpe={sr_val:.3f}, Drawdown={dd_val*100:.2f}%\n")
         logger.info(log_msg_train.strip())
         logger.info(log_msg_val.strip())
 
@@ -1061,6 +992,7 @@ def iterative_optimization(
             f.write(log_msg_train)
             f.write(log_msg_val)
 
+        # Adjust the learning rate.
         decayed_lr = exponential_decay_lr(initial_lr, itx, decay_rate, min_lr)
         combined_sharpe = (0.3 * sr_train + 0.7 * sr_val)
 
@@ -1079,8 +1011,58 @@ def iterative_optimization(
         current_lr = decayed_lr
         if hasattr(model.optimizer, 'learning_rate'):
             model.optimizer.learning_rate.assign(current_lr)
-
         logger.info(f"Adjusted learning rate to {current_lr:.6f}")
+
+        # ===== New: Build a training dataset from the training trades =====
+        # For each trade, the feature vector is built based on the indicator values.
+        # Expected keys in the trade dict:
+        # "RSI", "RSI_STD", "MACD", "ATR_Filter", "Sector", "RelativeVolume", "Multi_MA", "Crossover"
+        X_train = []
+        y_train_pnl = []
+        y_train_win = []
+        for trade in train_trades:
+            try:
+                # Build features in the order defined by feature_order.
+                row = [
+                    trade["RSI"],
+                    trade["RSI_STD"],
+                    trade["MACD"],
+                    trade["ATR_Filter"],
+                    trade["Sector"],
+                    trade["RelativeVolume"],
+                    trade["Multi_MA"],
+                    trade["Crossover"]
+                ]
+                X_train.append(row)
+                y_train_pnl.append(trade["PnL"])
+                y_train_win.append(trade["WinLoss"])
+            except KeyError as e:
+                logger.warning(f"Missing expected key {e} in trade data; skipping trade.")
+        
+        if X_train:
+            X_train = np.array(X_train)
+            y_train_pnl = np.array(y_train_pnl)
+            y_train_win = np.array(y_train_win)
+
+            # Scale the training features.
+            X_train_scaled = scaler.fit_transform(X_train)
+
+            # Train the model for a small number of epochs.
+            # Adjust epochs and batch_size as needed based on your data.
+            history = model.fit(
+                X_train_scaled,
+                {"pnl": y_train_pnl, "win_loss": y_train_win},
+                epochs=5,
+                verbose=0
+            )
+            logger.info(f"Training loss: {history.history}")
+        else:
+            logger.info("No valid training data extracted; skipping model update for this iteration.")
+
+        # ===== Extract new indicator weights from the model =====
+        new_weights = extract_indicator_weights(model)
+        logger.info(f"Extracted new indicator weights: {new_weights}")
+        base_weights = new_weights  # Update base weights for subsequent iterations
 
     return base_weights
 
@@ -1091,7 +1073,7 @@ def main():
     logger.info("=== Starting Revised Neural Score Optimization ===")
     final_w = iterative_optimization(
         stock_library_csv="stock_library.csv",
-        iterations=300,  # Adjust iteration count as desired
+        iterations=200,  # Adjust iteration count as desired
         base_weights={"rsi": 0.1, "rsi_std": 0.1, "macd": 0.1, "atr_filter": 0.1, "sector": 0.1, "rvol": 0.1, "multi_ma": 0.1, "crossover": 0.1}
     )
     logger.info(f"Final Weights after all iterations: {final_w}")
