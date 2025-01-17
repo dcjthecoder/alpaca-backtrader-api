@@ -54,7 +54,6 @@ logger_yf.propagate = False
 
 TRADE_LOG_FILE = "trade_details.csv"  # CSV to which backtest trades (with indicators) are logged
 META_LOG_FILE = "meta_log.txt"         # Text file for iteration-level summaries
-OVERNIGHT_LOG_FILE = "overnight_trade_details.csv"
 
 ###############################################################################
 #                        INDICATOR & HELPER FUNCTIONS                         #
@@ -210,25 +209,68 @@ def compute_atr_filter_score(df: pd.DataFrame, atr_series: pd.Series, historical
         else:
             return 0.5
 
-def compute_multi_ma_score(df: pd.DataFrame, ma_periods=[20, 50, 200]) -> float:
+def compute_adx_di_score(df: pd.DataFrame, period: int = 14) -> float:
     """
-    Evaluates alignment of multiple SMAs. Bullish (short > mid > long) yields a higher score.
+    Evaluates trend strength and direction using ADX and +DI/-DI.
+    Higher scores indicate strong bullish trends, while lower scores indicate strong bearish trends.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing 'High', 'Low', and 'Close' columns.
+        period (int): Lookback period for ADX and directional indicators.
+
+    Returns:
+        float: A score between 0.0 and 1.0 based on ADX, +DI, and -DI.
     """
-    if len(df) < max(ma_periods):
+    if len(df) < period + 1:
+        return 0.5  # Neutral score if insufficient data
+
+    # Calculate the directional movement
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    up_move = high.diff()
+    down_move = low.diff()
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    true_range = np.maximum.reduce([tr1, tr2, tr3])
+
+    smoothed_tr = pd.Series(true_range).rolling(period).mean()
+    smoothed_plus_dm = pd.Series(plus_dm).rolling(period).mean()
+    smoothed_minus_dm = pd.Series(minus_dm).rolling(period).mean()
+
+    # Calculate +DI and -DI
+    plus_di = (smoothed_plus_dm / smoothed_tr) * 100
+    minus_di = (smoothed_minus_dm / smoothed_tr) * 100
+
+    # Calculate ADX
+    di_diff = abs(plus_di - minus_di)
+    di_sum = plus_di + minus_di
+    dx = (di_diff / di_sum) * 100
+    adx = dx.rolling(period).mean()
+
+    # Get the latest values for ADX, +DI, and -DI
+    latest_adx = adx.iloc[-1] if not adx.empty else 0.0
+    latest_plus_di = plus_di.iloc[-1] if not plus_di.empty else 0.0
+    latest_minus_di = minus_di.iloc[-1] if not minus_di.empty else 0.0
+
+    # Scoring logic
+    if latest_adx < 20:
+        # Weak trend
         return 0.5
-    ma_vals = {}
-    for p in ma_periods:
-        ma_vals[p] = df["Close"].rolling(p).mean().iloc[-1]
-    sorted_periods = sorted(ma_periods)
-    short_ma, mid_ma, long_ma = ma_vals[sorted_periods[0]], ma_vals[sorted_periods[1]], ma_vals[sorted_periods[2]]
-    if short_ma > mid_ma > long_ma:
-        spacing = (short_ma - mid_ma) + (mid_ma - long_ma)
-        rel_spacing = spacing / long_ma
-        return float(np.clip(0.5 + rel_spacing, 0.0, 1.0))
-    elif short_ma < mid_ma < long_ma:
-        return 0.0
+    elif latest_plus_di > latest_minus_di:
+        # Bullish trend
+        score = 0.7 + 0.3 * (latest_adx / 100)  # Scale ADX contribution
     else:
-        return 0.5
+        # Bearish trend
+        score = 0.3 - 0.3 * (latest_adx / 100)
+
+    return float(np.clip(score, 0.0, 1.0))
 
 def compute_crossover_score(df: pd.DataFrame, short_period=10, long_period=30,
                             historical_diff: Optional[pd.Series] = None) -> float:
@@ -410,7 +452,7 @@ def final_score_indicators(
     if weights_dict is None:
         weights_dict = {
             'rsi': 1.0, 'rsi_std': 0.5, 'macd': 1.0, 'atr_filter': 1.0,
-            'sector': 1.0, 'rvol': 1.0, 'multi_ma': 1.0, 'crossover': 1.0
+            'sector': 1.0, 'rvol': 1.0, 'adx_di': 1.0, 'crossover': 1.0
         }
     if len(df) < 30:
         return 0.5
@@ -424,7 +466,7 @@ def final_score_indicators(
 
     atr_series = compute_atr(df[["High", "Low", "Close"]], period=14)
     atr_filter_val = compute_atr_filter_score(df, atr_series, None)
-    multi_ma_val = compute_multi_ma_score(df)
+    adx_di_val = compute_adx_di_score(df)
     sma10 = df["Close"].rolling(10).mean()
     sma30 = df["Close"].rolling(30).mean()
     diff_sma_series = sma10 - sma30 if len(sma10) == len(sma30) else None
@@ -441,7 +483,7 @@ def final_score_indicators(
         "atr_filter": atr_filter_val,
         "sector": sector_score_mapped,
         "rvol": rvol_score_val,
-        "multi_ma": multi_ma_val,
+        "adx_di": adx_di_val,
         "crossover": crossover_score_val
     }
 
@@ -513,8 +555,6 @@ def backtest_strategy(
     # Remove old trade file if it exists
     if os.path.exists(TRADE_LOG_FILE):
         os.remove(TRADE_LOG_FILE)
-    if os.path.exists(OVERNIGHT_LOG_FILE):
-        os.remove(OVERNIGHT_LOG_FILE)
 
     logger.info(f"Starting Backtest from {start.date()} to {end.date()} on tickers: {tickers}")
     initial_balance = account_balance
@@ -636,7 +676,7 @@ def backtest_strategy(
                     atr_fval = pos["indicators"]["atr_filter"]
                     sector_mapped = pos["indicators"]["sector"]
                     rvol_val = pos["indicators"]["rvol"]
-                    multi_ma_static = pos["indicators"]["multi_ma"]
+                    adx_di_static = pos["indicators"]["adx_di"]
                     crossover_static = pos["indicators"]["crossover"]
                     held_overnights = pos["held_overnights"]
 
@@ -645,18 +685,12 @@ def backtest_strategy(
                         f"{pos['entry_price']:.2f},{exit_price:.2f},{pos['shares']},"
                         f"{pnl:.2f},{win_loss_flag},{trade_return:.5f},"
                         f"{rsi_static:.3f},{rsi_std_val:.3f},{macd_static:.3f},{atr_fval:.3f},"
-                        f"{sector_mapped:.3f},{rvol_val:.3f},{multi_ma_static:.3f},{crossover_static:.3f},"
+                        f"{sector_mapped:.3f},{rvol_val:.3f},{adx_di_static:.3f},{crossover_static:.3f},"
                         f"{held_overnights}\n"
                     )
 
-                    if held_overnights > 0:
-                        with open(OVERNIGHT_LOG_FILE, "a") as fh:
-                            fh.write(line)
-                        with open(TRADE_LOG_FILE, "a") as fh:
-                            fh.write(line)
-                    else:
-                        with open(TRADE_LOG_FILE, "a") as fh:
-                            fh.write(line)
+                    with open(TRADE_LOG_FILE, "a") as fh:
+                        fh.write(line)
 
                     # Add to trades_list
                     trades_list.append({
@@ -675,7 +709,7 @@ def backtest_strategy(
                         "ATR_Filter": atr_fval,
                         "Sector": sector_mapped,
                         "RelativeVolume": rvol_val,
-                        "Multi_MA": multi_ma_static,
+                        "ADX_DI": adx_di_static,
                         "Crossover": crossover_static,
                         "HeldOvernights": held_overnights
                     })
@@ -774,7 +808,7 @@ def backtest_strategy(
                     atr_fval = pos["indicators"]["atr_filter"]
                     sector_mapped = pos["indicators"]["sector"]
                     rvol_val = pos["indicators"]["rvol"]
-                    multi_ma_static = pos["indicators"]["multi_ma"]
+                    adx_di_static = pos["indicators"]["adx_di"]
                     crossover_static = pos["indicators"]["crossover"]
                     held_overnights = pos["held_overnights"]
 
@@ -783,17 +817,11 @@ def backtest_strategy(
                         f"{pos['entry_price']:.2f},{exit_price:.2f},{pos['shares']},"
                         f"{pnl:.2f},{win_loss_flag},{trade_return:.5f},"
                         f"{rsi_static:.3f},{rsi_std_val:.3f},{macd_static:.3f},{atr_fval:.3f},"
-                        f"{sector_mapped:.3f},{rvol_val:.3f},{multi_ma_static:.3f},{crossover_static:.3f},"
+                        f"{sector_mapped:.3f},{rvol_val:.3f},{adx_di_static:.3f},{crossover_static:.3f},"
                         f"{held_overnights}\n"
                     )
-                    if held_overnights > 0:
-                        with open(OVERNIGHT_LOG_FILE, "a") as fh:
-                            fh.write(line)
-                        with open(TRADE_LOG_FILE, "a") as fh:
-                            fh.write(line)
-                    else:
-                        with open(TRADE_LOG_FILE, "a") as fh:
-                            fh.write(line)
+                    with open(TRADE_LOG_FILE, "a") as fh:
+                        fh.write(line)
 
                     trades_list.append({
                         "Ticker": tk,
@@ -811,7 +839,7 @@ def backtest_strategy(
                         "ATR_Filter": atr_fval,
                         "Sector": sector_mapped,
                         "RelativeVolume": rvol_val,
-                        "Multi_MA": multi_ma_static,
+                        "ADX_DI": adx_di_static,
                         "Crossover": crossover_static,
                         "HeldOvernights": held_overnights
                     })
@@ -847,7 +875,7 @@ def backtest_strategy(
                     rsi_final = compute_rsi_score(rsi_series_, sector_factor=sector_val)
                     sector_mapped = (sector_val + 2.0) / 4.0
                     rvol_val = compute_relative_volume_score(df_tk_up_to_day)
-                    multi_ma_static = compute_multi_ma_score(df_tk_up_to_day)
+                    adx_di_static = compute_adx_di_score(df_tk_up_to_day)
                     sma10_ = df_tk_up_to_day["Close"].rolling(10).mean()
                     sma30_ = df_tk_up_to_day["Close"].rolling(30).mean()
                     diff_sma_ = sma10_ - sma30_ if len(sma10_) == len(sma30_) else None
@@ -868,7 +896,7 @@ def backtest_strategy(
                             "atr_filter": atr_fval,
                             "sector": sector_mapped,
                             "rvol": rvol_val,
-                            "multi_ma": multi_ma_static,
+                            "adx_di": adx_di_static,
                             "crossover": crossover_static
                         }
                     }
@@ -944,8 +972,8 @@ def extract_indicator_weights(model: Model) -> dict:
     w = layer.get_weights()[0]  # shape: (input_dim, hidden_units)
     mean_w = np.mean(np.abs(w), axis=1)
     norm_w = mean_w / np.sum(mean_w)
-    # The 8 indicators: RSI, RSI_STD, MACD, ATR_Filter, Sector, Rvol, Multi_MA, Crossover
-    names = ['rsi','rsi_std','macd','atr_filter','sector','rvol','multi_ma','crossover']
+    # The 8 indicators: RSI, RSI_STD, MACD, ATR_Filter, Sector, Rvol, ADX_DI, Crossover
+    names = ['rsi','rsi_std','macd','atr_filter','sector','rvol','adx_di','crossover']
     out = {}
     for i, nm in enumerate(names):
         out[nm] = float(norm_w[i]) if i < len(norm_w) else 0.0
@@ -985,7 +1013,7 @@ def iterative_optimization(
     if not base_weights:
         base_weights = {
             'rsi': 1.0, 'rsi_std': 0.5, 'macd': 1.0, 'atr_filter': 1.0,
-            'sector': 1.0, 'rvol': 1.0, 'multi_ma': 1.0, 'crossover': 1.0
+            'sector': 1.0, 'rvol': 1.0, 'adx_di': 1.0, 'crossover': 1.0
         }
 
     current_lr = initial_lr
@@ -1022,7 +1050,7 @@ def iterative_optimization(
 
     # Define the feature order for training.
     # Note: The keys below match those used when logging trades.
-    feature_order = ['rsi', 'rsi_std', 'macd', 'atr_filter', 'sector', 'rvol', 'multi_ma', 'crossover']
+    feature_order = ['rsi', 'rsi_std', 'macd', 'atr_filter', 'sector', 'rvol', 'adx_di', 'crossover']
 
     for itx in range(1, iterations + 1):
         logger.info(f"\n=== Iteration {itx} ===")
@@ -1066,9 +1094,9 @@ def iterative_optimization(
         total_pnl_val, wr_val, sr_val, dd_val = summarize_trades(val_trades, 50000.0)
         sharpe_history.append(sr_val)
 
-        log_msg_train = (f"Iteration {itx}, TRAIN => PnL={total_pnl_train:.2f}, "
+        log_msg_train = (f"Iteration {itx}, ({train_start} to {train_end}) TRAIN => PnL={total_pnl_train:.2f}, "
                          f"WinRate={wr_train*100:.2f}%, Sharpe={sr_train:.3f}, Drawdown={dd_train*100:.2f}%\n")
-        log_msg_val = (f"Iteration {itx}, VALID => PnL={total_pnl_val:.2f}, "
+        log_msg_val = (f"Iteration {itx}, ({val_start} to {val_end}) VALID => PnL={total_pnl_val:.2f}, "
                        f"WinRate={wr_val*100:.2f}%, Sharpe={sr_val:.3f}, Drawdown={dd_val*100:.2f}%\n")
         logger.info(log_msg_train.strip())
         logger.info(log_msg_val.strip())
@@ -1101,7 +1129,7 @@ def iterative_optimization(
         # ===== New: Build a training dataset from the training trades =====
         # For each trade, the feature vector is built based on the indicator values.
         # Expected keys in the trade dict:
-        # "RSI", "RSI_STD", "MACD", "ATR_Filter", "Sector", "RelativeVolume", "Multi_MA", "Crossover"
+        # "RSI", "RSI_STD", "MACD", "ATR_Filter", "Sector", "RelativeVolume", "ADX_DI", "Crossover"
         X_train = []
         y_train_pnl = []
         y_train_win = []
@@ -1115,7 +1143,7 @@ def iterative_optimization(
                     trade["ATR_Filter"],
                     trade["Sector"],
                     trade["RelativeVolume"],
-                    trade["Multi_MA"],
+                    trade["ADX_DI"],
                     trade["Crossover"]
                 ]
                 X_train.append(row)
@@ -1159,8 +1187,8 @@ def main():
     logger.info("=== Starting Revised Neural Score Optimization ===")
     final_w = iterative_optimization(
         stock_library_csv="stock_library.csv",
-        iterations=200,  # Adjust iteration count as desired
-        base_weights={"rsi": 0.1, "rsi_std": 0.1, "macd": 0.1, "atr_filter": 0.1, "sector": 0.1, "rvol": 0.1, "multi_ma": 0.1, "crossover": 0.1}
+        iterations=3,  # Adjust iteration count as desired
+        base_weights={"rsi": 0.1, "rsi_std": 0.1, "macd": 0.1, "atr_filter": 0.1, "sector": 0.1, "rvol": 0.1, "adx_di": 0.1, "crossover": 0.1}
     )
     logger.info(f"Final Weights after all iterations: {final_w}")
     with open("optimized_weights.json", "w") as f:

@@ -23,8 +23,6 @@ from dotenv import load_dotenv
 ###############################################################################
 #                              ENV & LOGGING                                  #
 ###############################################################################
-LOG_FILE = "log_stock_library.log"
-
 from logging.handlers import RotatingFileHandler
 
 logger = logging.getLogger(__name__)
@@ -32,20 +30,13 @@ logger.setLevel(logging.DEBUG)  # DEBUG level for detailed messages
 
 # Create handlers
 console_handler = logging.StreamHandler(sys.stdout)
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10**6, backupCount=5)
 
 # Create formatter and add it to handlers
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 console_handler.setFormatter(formatter)
-file_handler.setFormatter(formatter)
 
 # Add handlers to logger
 logger.addHandler(console_handler)
-logger.addHandler(file_handler)
-
-# Load environment variables from env.txt if present
-load_dotenv("env.txt")
-# (No Alpaca keys are used; they are ignored if present)
 
 ###############################################################################
 #                        QUERY CONSTRUCTION FUNCTIONS                         #
@@ -222,15 +213,13 @@ def build_stock_library(
                     continue
                 # Ensure the 'Close' column is a Series by squeezing.
                 close_series = df['Close'].squeeze()
-                start_price = float(close_series.iloc[0])
                 current_price = float(close_series.iloc[-1])
-                pct_change = (current_price - start_price) / start_price
-                if abs(pct_change) < 0.05:
-                    logger.debug(f"Ticker {sym} rejected: price change {pct_change*100:.2f}% is below 5%.")
+                if current_price < 1.0:
+                    logger.debug(f"Ticker {sym} rejected: price ${current_price:.2f} is below $1.")
                     continue
 
                 library.add(sym)
-                logger.info(f"Ticker {sym} accepted: Market Cap=${market_cap}, Price Change={pct_change*100:.2f}%.")
+                logger.info(f"Ticker {sym} accepted: Market Cap=${market_cap}, Price=${current_price:.2f}.")
                 if len(library) >= desired_count:
                     logger.info("Desired ticker count reached.")
                     break
