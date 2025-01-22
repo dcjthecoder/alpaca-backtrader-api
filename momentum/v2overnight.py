@@ -345,7 +345,7 @@ def compute_sector_factor(sector_df: pd.DataFrame, signal_date: datetime, rollin
     base_perf = float(base_perf)
     sector_score = np.clip(base_perf * 5, -1.0, 1.0)
 
-    # Compare with index (SPY for ex) if provided
+    # Compare with index (QQQ for ex) if provided
     if (compare_index_df is not None) and ("Close" in compare_index_df.columns):
         if signal_date not in compare_index_df.index:
             idx_dates = compare_index_df.index[compare_index_df.index <= signal_date]
@@ -407,7 +407,7 @@ def compute_sector_performance(sector_etf: str, start: datetime, end: datetime) 
 ###############################################################################
 #                          DRAWDOWN & EQUITY CURVE                            #
 ###############################################################################
-def compute_max_drawdown(trades: List[Dict[str, Any]], initial_balance: float = 50000.0) -> float:
+def compute_max_drawdown(trades: List[Dict[str, Any]], initial_balance: float = 5000.0) -> float:
     """
     Compute maximum drawdown from a list of trades.
     We'll order trades by ExitDate and track equity after each exit.
@@ -535,23 +535,30 @@ def backtest_strategy(
     start: datetime,
     end: datetime,
     sector_etf="XLK",
-    compare_index_etf: Optional[str] = "SPY",
+    compare_index_etf: Optional[str] = "QQQ",
     volatility_threshold=1.0,
     buy_score_threshold=0.7,
-    account_balance=50000.0,
+    account_balance=5000.0,
     allocation_pct=0.07,
     stop_loss_multiplier=1.5,
     profit_target_multiplier=3.0,
-    weights_dict: Optional[Dict[str, float]] = None
+    weights_dict: Optional[Dict[str, float]] = None,
+    PDT: bool = True  # Parameter to enable/disable PDT rule
 ) -> List[Dict[str, Any]]:
     """
-    Now iterates day by day with all tickers simultaneously.
-    Preserves the same intraday vs. overnight logic, earnings checks,
-    and partial close logic as before, but in a single pass over dates.
-
-    Returns:
-        List of trades in the same structure as before, one dictionary per trade.
+    Runs a backtest across multiple tickers over the specified date range, using
+    a multi-indicator scoring approach for entry, combined with stop/target
+    exits, earnings checks, partial closes, and an optional Pattern Day Trader (PDT) limit.
+    
+    New Logic:
+      - Each day, compute scores for all non-open tickers.
+      - Sort them descending by score.
+      - Determine how many day trades used in last 5 days (if PDT=True).
+      - Let capacity = 3 - those day trades.
+      - Open up to 'capacity' new trades (highest scores).
+      - If a position closes same day => day trade.
     """
+
     # Remove old trade file if it exists
     if os.path.exists(TRADE_LOG_FILE):
         os.remove(TRADE_LOG_FILE)
@@ -559,7 +566,7 @@ def backtest_strategy(
     logger.info(f"Starting Backtest from {start.date()} to {end.date()} on tickers: {tickers}")
     initial_balance = account_balance
 
-    # Download all ticker data at once
+    # Download all ticker data
     try:
         raw_data = yf.download(
             tickers,
@@ -588,11 +595,10 @@ def backtest_strategy(
     # Build per-ticker dataframes
     df_dict = {}
     if len(tickers) == 1:
-        # In case there's only 1 ticker, the columns won't be multi-index
-        # so raw_data itself is that single ticker's DataFrame
+        # Single ticker => raw_data is that ticker's DataFrame
         df_dict[tickers[0]] = raw_data.dropna()
     else:
-        # Multi-index columns: top level = ticker, second level = OHLC
+        # Multi-index columns (ticker, OHLC)
         for tk in tickers:
             if tk not in raw_data.columns.levels[0]:
                 logger.warning(f"No data for ticker {tk}. Skipping.")
@@ -611,7 +617,6 @@ def backtest_strategy(
             yft = yf.Ticker(tk)
             earnings_df = yft.get_earnings_dates(limit=20)
             if earnings_df is not None and not earnings_df.empty:
-                # Some returns have DatetimeIndex, others have 'Earnings Date' column
                 if isinstance(earnings_df.index, pd.DatetimeIndex):
                     earnings_dates = set(earnings_df.index.normalize())
                 elif 'Earnings Date' in earnings_df.columns:
@@ -630,46 +635,40 @@ def backtest_strategy(
     for tk, df_tk in df_dict.items():
         if not df_tk.empty:
             for d in df_tk.index:
-                # Only consider dates in [start, end]
                 if start <= d <= end:
                     all_dates.add(d)
     all_dates = sorted(all_dates)
 
-    # A dictionary to track open positions
-    # None => no open position
-    # Or a dict with entry info, stop, profit, etc.
+    # Track open positions (one per ticker)
     positions = {tk: None for tk in tickers}
 
-    # If we decide on day X that we will close at next day open,
-    # store that info here, keyed by ticker.
-    # We'll handle it at the start of each day's loop.
+    # If a position is flagged to close next day open, we store here
     close_next_open = {tk: False for tk in tickers}
 
     trades_list: List[Dict[str, Any]] = []
 
-    # Iterate over each date in chronological order
-    for day_idx, day in enumerate(all_dates):
-        next_day = all_dates[day_idx+1] if (day_idx + 1 < len(all_dates)) else None
+    # PDT: store dates on which a trade closed same day => "day trade"
+    day_trade_dates: List[pd.Timestamp] = []
 
-        # 1) First handle any positions flagged to close at next day open.
+    for day_idx, day in enumerate(all_dates):
+        next_day = all_dates[day_idx + 1] if day_idx + 1 < len(all_dates) else None
+
+        # (1) Close positions flagged for next-day exit
         for tk in tickers:
             if close_next_open[tk] and tk in df_dict:
                 df_tk = df_dict[tk]
                 if day in df_tk.index and positions[tk] is not None:
-                    # Close at day open
                     pos = positions[tk]
                     exit_price = float(df_tk.loc[day, "Open"])
                     exit_date = day
-                    exit_action = "NextDay_ScoreDrop"  # matches original logic
-                    trade_open = True
-
-                    # Finalize the trade
                     pnl = (exit_price - pos["entry_price"]) * pos["shares"]
                     account_balance += pnl
                     win_loss_flag = 1 if pnl > 0 else 0
-                    trade_return = pnl / (pos["entry_price"] * pos["shares"]) if pos["shares"] > 0 else 0.0
+                    trade_return = (
+                        pnl / (pos["entry_price"] * pos["shares"]) if pos["shares"] > 0 else 0.0
+                    )
 
-                    # Log trade
+                    # Write to file
                     rsi_static = pos["indicators"]["rsi"]
                     rsi_std_val = pos["indicators"]["rsi_std"]
                     macd_static = pos["indicators"]["macd"]
@@ -688,11 +687,9 @@ def backtest_strategy(
                         f"{sector_mapped:.3f},{rvol_val:.3f},{adx_di_static:.3f},{crossover_static:.3f},"
                         f"{held_overnights}\n"
                     )
-
                     with open(TRADE_LOG_FILE, "a") as fh:
                         fh.write(line)
 
-                    # Add to trades_list
                     trades_list.append({
                         "Ticker": tk,
                         "EntryDate": pos["entry_date"],
@@ -715,23 +712,147 @@ def backtest_strategy(
                     })
 
                     positions[tk] = None
-                close_next_open[tk] = False  # Reset
+                close_next_open[tk] = False
 
-        # 2) Now process normal daily checks for each ticker
+        # (2) Update existing open positions (stop/profit/intraday vs overnight logic)
+        #     We do this before opening new positions, so we know how many day trades we used.
+        for tk in list(positions.keys()):
+            if positions[tk] is None:
+                continue  # no open position
+            if tk not in df_dict:
+                continue
+            if day not in df_dict[tk].index:
+                continue
+
+            pos = positions[tk]
+            df_tk = df_dict[tk]
+            day_open = float(df_tk.loc[day, "Open"])
+            day_high = float(df_tk.loc[day, "High"])
+            day_low = float(df_tk.loc[day, "Low"])
+            day_close = float(df_tk.loc[day, "Close"])
+
+            trade_open = True
+            exit_action = None
+            exit_price = None
+
+            # Check stop
+            if day_low <= pos["stop_price"]:
+                exit_price = pos["stop_price"]
+                exit_action = "SL"
+                trade_open = False
+            # Check target
+            elif day_high >= pos["profit_price"]:
+                exit_price = pos["profit_price"]
+                exit_action = "TP"
+                trade_open = False
+            else:
+                # If entry_score is just above threshold => intraday close
+                if pos["entry_score"] < (buy_score_threshold + 0.10):
+                    # Intraday => close at day's close
+                    exit_price = day_close
+                    exit_action = "Intraday_Close"
+                    trade_open = False
+                else:
+                    # Possibly hold overnight
+                    if next_day is None:
+                        # Last day => close EOD
+                        exit_price = day_close
+                        exit_action = "LastDay_Close"
+                        trade_open = False
+                    else:
+                        # Check if next day is earnings
+                        if next_day in earnings_dict[tk]:
+                            exit_price = day_close
+                            exit_action = "Earnings_NextDay"
+                            trade_open = False
+                        else:
+                            # remain open
+                            pos["held_overnights"] += 1
+
+            if not trade_open and exit_price is not None:
+                exit_date = day
+                pnl = (exit_price - pos["entry_price"]) * pos["shares"]
+                account_balance += pnl
+                win_loss_flag = 1 if pnl > 0 else 0
+                trade_return = (
+                    pnl / (pos["entry_price"] * pos["shares"]) if pos["shares"] > 0 else 0.0
+                )
+
+                rsi_static = pos["indicators"]["rsi"]
+                rsi_std_val = pos["indicators"]["rsi_std"]
+                macd_static = pos["indicators"]["macd"]
+                atr_fval = pos["indicators"]["atr_filter"]
+                sector_mapped = pos["indicators"]["sector"]
+                rvol_val = pos["indicators"]["rvol"]
+                adx_di_static = pos["indicators"]["adx_di"]
+                crossover_static = pos["indicators"]["crossover"]
+                held_overnights = pos["held_overnights"]
+
+                line = (
+                    f"{tk},{pos['entry_date']},{exit_date},"
+                    f"{pos['entry_price']:.2f},{exit_price:.2f},{pos['shares']},"
+                    f"{pnl:.2f},{win_loss_flag},{trade_return:.5f},"
+                    f"{rsi_static:.3f},{rsi_std_val:.3f},{macd_static:.3f},{atr_fval:.3f},"
+                    f"{sector_mapped:.3f},{rvol_val:.3f},{adx_di_static:.3f},{crossover_static:.3f},"
+                    f"{held_overnights}\n"
+                )
+                with open(TRADE_LOG_FILE, "a") as fh:
+                    fh.write(line)
+
+                trades_list.append({
+                    "Ticker": tk,
+                    "EntryDate": pos["entry_date"],
+                    "ExitDate": exit_date,
+                    "EntryPrice": pos["entry_price"],
+                    "ExitPrice": exit_price,
+                    "Shares": pos["shares"],
+                    "PnL": pnl,
+                    "WinLoss": win_loss_flag,
+                    "ReturnPerc": trade_return,
+                    "RSI": rsi_static,
+                    "RSI_STD": rsi_std_val,
+                    "MACD": macd_static,
+                    "ATR_Filter": atr_fval,
+                    "Sector": sector_mapped,
+                    "RelativeVolume": rvol_val,
+                    "ADX_DI": adx_di_static,
+                    "Crossover": crossover_static,
+                    "HeldOvernights": held_overnights
+                })
+
+                # If entry_date == exit_date => day trade
+                if pos["entry_date"] == exit_date:
+                    day_trade_dates.append(exit_date)
+
+                positions[tk] = None
+
+        # (3) Determine how many day trades used in last 5 days => capacity
+        if PDT:
+            start_5day_idx = max(0, day_idx - 4)
+            five_day_window = all_dates[start_5day_idx : day_idx + 1]
+            recent_dt_count = sum(1 for dtd in day_trade_dates if dtd in five_day_window)
+            capacity = max(0, 3 - recent_dt_count)
+        else:
+            capacity = 3  # effectively no limit if PDT=False
+
+        if capacity <= 0:
+            # Can't open any new trades
+            continue
+
+        # (4) Among tickers *without* open positions, compute daily final scores => pick top 'capacity'
+        scores_for_day = []
         for tk in tickers:
-            # Skip if we have no data for this ticker or day not in that df
+            if positions[tk] is not None:
+                continue  # skip if already open
             if tk not in df_dict:
                 continue
             df_tk = df_dict[tk]
             if day not in df_tk.index:
                 continue
-
-            # If we don't even have 30 days of history up to this day, skip
             df_tk_up_to_day = df_tk.loc[:day]
             if len(df_tk_up_to_day) < 30:
                 continue
 
-            # Calculate the daily final score
             score_val = final_score_indicators(
                 df_tk_up_to_day,
                 sector_data,
@@ -740,168 +861,74 @@ def backtest_strategy(
                 volatility_threshold=volatility_threshold,
                 weights_dict=weights_dict
             )
+            scores_for_day.append((tk, score_val))
 
-            # If there's an existing open position, check intraday price action
-            if positions[tk] is not None:
-                pos = positions[tk]
-                day_open = float(df_tk.loc[day, "Open"])
-                day_high = float(df_tk.loc[day, "High"])
-                day_low = float(df_tk.loc[day, "Low"])
-                day_close = float(df_tk.loc[day, "Close"])
+        # Sort descending by score
+        scores_for_day.sort(key=lambda x: x[1], reverse=True)
 
-                # Intraday stop or profit
-                # Stop first
-                if day_low <= pos["stop_price"]:
-                    exit_price = pos["stop_price"]
-                    exit_date = day
-                    exit_action = "SL"
-                    trade_open = False
-                # Then profit
-                elif day_high >= pos["profit_price"]:
-                    exit_price = pos["profit_price"]
-                    exit_date = day
-                    exit_action = "TP"
-                    trade_open = False
-                else:
-                    # Not triggered stop or target
-                    # Intraday vs overnight logic
-                    if pos["entry_score"] < 0.75:
-                        # Was an intraday trade => close at day's close
-                        exit_price = day_close
-                        exit_date = day
-                        exit_action = "Intraday_Close"
-                        trade_open = False
-                    else:
-                        # Overnight candidate
-                        # Check if next_day is earnings => close EOD
-                        if next_day is None:
-                            # Last day => close EOD
-                            exit_price = day_close
-                            exit_date = day
-                            exit_action = "LastDay_Close"
-                            trade_open = False
-                        else:
-                            # See if next day is earnings
-                            if next_day in earnings_dict[tk]:
-                                # close at today's close
-                                exit_price = day_close
-                                exit_date = day
-                                exit_action = "Earnings_NextDay"
-                                trade_open = False
-                            else:
-                                # Potential hold overnight => we wait.
-                                # We'll re-check the score next day morning (via close_next_open if needed)
-                                # For now, we remain open, increment held overnights
-                                pos["held_overnights"] += 1
-                                trade_open = True
+        # (5) Open up to 'capacity' trades from top scores that exceed the threshold
+        to_open = []
+        for tk, sc in scores_for_day:
+            if sc > buy_score_threshold:  # Only consider scores above the threshold
+                to_open.append((tk, sc))
 
-                if not trade_open:
-                    # Close the trade
-                    pnl = (exit_price - pos["entry_price"]) * pos["shares"]
-                    account_balance += pnl
-                    win_loss_flag = 1 if pnl > 0 else 0
-                    trade_return = pnl / (pos["entry_price"] * pos["shares"]) if pos["shares"] > 0 else 0.0
+        # Sort descending by score and limit to the capacity
+        to_open = sorted(to_open, key=lambda x: x[1], reverse=True)[:capacity]
 
-                    rsi_static = pos["indicators"]["rsi"]
-                    rsi_std_val = pos["indicators"]["rsi_std"]
-                    macd_static = pos["indicators"]["macd"]
-                    atr_fval = pos["indicators"]["atr_filter"]
-                    sector_mapped = pos["indicators"]["sector"]
-                    rvol_val = pos["indicators"]["rvol"]
-                    adx_di_static = pos["indicators"]["adx_di"]
-                    crossover_static = pos["indicators"]["crossover"]
-                    held_overnights = pos["held_overnights"]
+        # Open trades for the selected tickers
+        for tk, sc in to_open:
+            df_tk = df_dict[tk]
+            day_open = float(df_tk.loc[day, "Open"])
+            position_value = account_balance * allocation_pct
+            shares = int(position_value // day_open)
+            if shares <= 0:
+                continue
 
-                    line = (
-                        f"{tk},{pos['entry_date']},{exit_date},"
-                        f"{pos['entry_price']:.2f},{exit_price:.2f},{pos['shares']},"
-                        f"{pnl:.2f},{win_loss_flag},{trade_return:.5f},"
-                        f"{rsi_static:.3f},{rsi_std_val:.3f},{macd_static:.3f},{atr_fval:.3f},"
-                        f"{sector_mapped:.3f},{rvol_val:.3f},{adx_di_static:.3f},{crossover_static:.3f},"
-                        f"{held_overnights}\n"
-                    )
-                    with open(TRADE_LOG_FILE, "a") as fh:
-                        fh.write(line)
+            # Compute dynamic ATR-based stop/profit
+            ds_mult, dp_mult = compute_dynamic_atr_multiplier(
+                df_tk.loc[:day], stop_loss_multiplier, profit_target_multiplier
+            )
+            atr_val = compute_atr(df_tk.loc[:day][["High", "Low", "Close"]], 14).iloc[-1]
+            stop_price = day_open - (atr_val * ds_mult)
+            profit_price = day_open + (atr_val * dp_mult)
 
-                    trades_list.append({
-                        "Ticker": tk,
-                        "EntryDate": pos["entry_date"],
-                        "ExitDate": exit_date,
-                        "EntryPrice": pos["entry_price"],
-                        "ExitPrice": exit_price,
-                        "Shares": pos["shares"],
-                        "PnL": pnl,
-                        "WinLoss": win_loss_flag,
-                        "ReturnPerc": trade_return,
-                        "RSI": rsi_static,
-                        "RSI_STD": rsi_std_val,
-                        "MACD": macd_static,
-                        "ATR_Filter": atr_fval,
-                        "Sector": sector_mapped,
-                        "RelativeVolume": rvol_val,
-                        "ADX_DI": adx_di_static,
-                        "Crossover": crossover_static,
-                        "HeldOvernights": held_overnights
-                    })
-                    positions[tk] = None
+            # Indicators for logging
+            rsi_series_ = compute_rsi(df_tk.loc[:day, "Close"], 14)
+            sector_val = compute_sector_factor(sector_data, day, 5, compare_index_data)
+            rsi_std_val = compute_rsi_std_score(rsi_series_, 14, 60, sector_val)
+            macd_static = compute_macd_score(df_tk.loc[:day, "Close"])
+            atr_series2 = compute_atr(df_tk.loc[:day][["High", "Low", "Close"]], 14)
+            atr_fval = compute_atr_filter_score(df_tk.loc[:day], atr_series2)
+            rsi_final = compute_rsi_score(rsi_series_, sector_factor=sector_val)
+            sector_mapped = (sector_val + 2.0) / 4.0
+            rvol_val = compute_relative_volume_score(df_tk.loc[:day])
+            adx_di_static = compute_adx_di_score(df_tk.loc[:day])
+            sma10_ = df_tk.loc[:day, "Close"].rolling(10).mean()
+            sma30_ = df_tk.loc[:day, "Close"].rolling(30).mean()
+            diff_sma_ = sma10_ - sma30_ if len(sma10_) == len(sma30_) else None
+            crossover_static = compute_crossover_score(df_tk.loc[:day], 10, 30, diff_sma_)
 
-                else:
-                    # We remained open (overnight). Do nothing special right now.
-                    pass
+            # Add position to open trades
+            positions[tk] = {
+                "entry_date": day,
+                "entry_price": day_open,
+                "shares": shares,
+                "stop_price": stop_price,
+                "profit_price": profit_price,
+                "entry_score": sc,
+                "held_overnights": 0,
+                "indicators": {
+                    "rsi": rsi_final,
+                    "rsi_std": rsi_std_val,
+                    "macd": macd_static,
+                    "atr_filter": atr_fval,
+                    "sector": sector_mapped,
+                    "rvol": rvol_val,
+                    "adx_di": adx_di_static,
+                    "crossover": crossover_static
+                }
+            }
 
-            else:
-                # No open position => consider opening a new trade
-                if score_val >= buy_score_threshold:
-                    # Buy at today's open
-                    day_open = float(df_tk.loc[day, "Open"])
-                    position_value = account_balance * allocation_pct
-                    shares = int(position_value // day_open)
-                    if shares <= 0:
-                        continue
-
-                    # Dynamic ATR
-                    ds_mult, dp_mult = compute_dynamic_atr_multiplier(df_tk_up_to_day, stop_loss_multiplier, profit_target_multiplier)
-                    atr_val = compute_atr(df_tk_up_to_day[["High", "Low", "Close"]], 14).iloc[-1]
-                    stop_price = day_open - (atr_val * ds_mult)
-                    profit_price = day_open + (atr_val * dp_mult)
-
-                    # Gather indicator static values for logging
-                    rsi_series_ = compute_rsi(df_tk_up_to_day["Close"], 14)
-                    sector_val = compute_sector_factor(sector_data, day, 5, compare_index_data)
-                    rsi_std_val = compute_rsi_std_score(rsi_series_, 14, 60, sector_val)
-                    macd_static = compute_macd_score(df_tk_up_to_day["Close"])
-                    atr_series2 = compute_atr(df_tk_up_to_day[["High","Low","Close"]], 14)
-                    atr_fval = compute_atr_filter_score(df_tk_up_to_day, atr_series2)
-                    rsi_final = compute_rsi_score(rsi_series_, sector_factor=sector_val)
-                    sector_mapped = (sector_val + 2.0) / 4.0
-                    rvol_val = compute_relative_volume_score(df_tk_up_to_day)
-                    adx_di_static = compute_adx_di_score(df_tk_up_to_day)
-                    sma10_ = df_tk_up_to_day["Close"].rolling(10).mean()
-                    sma30_ = df_tk_up_to_day["Close"].rolling(30).mean()
-                    diff_sma_ = sma10_ - sma30_ if len(sma10_) == len(sma30_) else None
-                    crossover_static = compute_crossover_score(df_tk_up_to_day, 10, 30, diff_sma_)
-
-                    positions[tk] = {
-                        "entry_date": day,
-                        "entry_price": day_open,
-                        "shares": shares,
-                        "stop_price": stop_price,
-                        "profit_price": profit_price,
-                        "entry_score": score_val,
-                        "held_overnights": 0,
-                        "indicators": {
-                            "rsi": rsi_final,
-                            "rsi_std": rsi_std_val,
-                            "macd": macd_static,
-                            "atr_filter": atr_fval,
-                            "sector": sector_mapped,
-                            "rvol": rvol_val,
-                            "adx_di": adx_di_static,
-                            "crossover": crossover_static
-                        }
-                    }
-
-    # End of loop over all_dates
     final_pnl = account_balance - initial_balance
     logger.info(f"Backtest completed. Start={initial_balance:.2f}, End={account_balance:.2f}, PnL={final_pnl:.2f}")
     return trades_list
@@ -937,7 +964,7 @@ def choose_valid_10_tickers_per_ticker(stock_lib: pd.DataFrame, start_date: date
     """
     valid_list = []
     attempts = 0
-    while (len(valid_list) < 10) and (attempts < max_attempts):
+    while (len(valid_list) < 15) and (attempts < max_attempts):
         tck = pick_valid_ticker(stock_lib, start_date, end_date)
         attempts += 1
         if tck and (tck not in valid_list):
@@ -958,9 +985,12 @@ def build_neural_model(input_dim: int, learning_rate=0.001) -> Model:
     pnl_output = Dense(1, activation='linear', name='pnl')(x)
     win_loss_output = Dense(1, activation='sigmoid', name='win_loss')(x)
 
+    # --- Gradient clipping added (clipnorm=1.0)
+    optimizer = Adam(learning_rate=learning_rate, clipnorm=1.0)
+
     model = Model(inputs=inputs, outputs=[pnl_output, win_loss_output])
     model.compile(
-        optimizer=Adam(learning_rate=learning_rate),
+        optimizer=optimizer,
         loss={'pnl': 'mse', 'win_loss': 'binary_crossentropy'},
         loss_weights={'pnl': 1.0, 'win_loss': 1.0},
         metrics={'pnl': 'mae', 'win_loss': 'accuracy'}
@@ -1026,7 +1056,7 @@ def iterative_optimization(
         logger.error("No valid dates in range!")
         sys.exit(1)
 
-    def summarize_trades(trades: List[Dict[str, Any]], initial_balance=50000.0):
+    def summarize_trades(trades: List[Dict[str, Any]], initial_balance=5000.0):
         if not trades:
             return (0.0, 0.0, 0.0, 0.0)
 
@@ -1072,8 +1102,8 @@ def iterative_optimization(
 
         # Run backtests on training data.
         train_trades = backtest_strategy(
-            tickers_chosen, train_start, train_end, sector_etf="XLK", compare_index_etf="SPY",
-            volatility_threshold=1.0, buy_score_threshold=0.7, account_balance=50000.0,
+            tickers_chosen, train_start, train_end, sector_etf="XLK", compare_index_etf="QQQ",
+            volatility_threshold=1.0, buy_score_threshold=0.7, account_balance=5000.0,
             allocation_pct=0.07, stop_loss_multiplier=1.5, profit_target_multiplier=3.0, weights_dict=base_weights
         )
         if not train_trades:
@@ -1082,16 +1112,16 @@ def iterative_optimization(
                 f.write(f"Iteration {itx}, TRAIN => No trades\n")
             continue
 
-        total_pnl_train, wr_train, sr_train, dd_train = summarize_trades(train_trades, 50000.0)
+        total_pnl_train, wr_train, sr_train, dd_train = summarize_trades(train_trades, 5000.0)
 
         # Run validation backtest.
         val_trades = backtest_strategy(
-            tickers_chosen, val_start, val_end, sector_etf="XLK", compare_index_etf="SPY",
-            volatility_threshold=1.0, buy_score_threshold=0.7, account_balance=50000.0,
+            tickers_chosen, val_start, val_end, sector_etf="XLK", compare_index_etf="QQQ",
+            volatility_threshold=1.0, buy_score_threshold=0.7, account_balance=5000.0,
             allocation_pct=0.07, stop_loss_multiplier=1.5, profit_target_multiplier=3.0, weights_dict=base_weights
         ) if val_start < val_end else []
 
-        total_pnl_val, wr_val, sr_val, dd_val = summarize_trades(val_trades, 50000.0)
+        total_pnl_val, wr_val, sr_val, dd_val = summarize_trades(val_trades, 5000.0)
         sharpe_history.append(sr_val)
 
         log_msg_train = (f"Iteration {itx}, ({train_start} to {train_end}) TRAIN => PnL={total_pnl_train:.2f}, "
@@ -1130,38 +1160,60 @@ def iterative_optimization(
         # For each trade, the feature vector is built based on the indicator values.
         # Expected keys in the trade dict:
         # "RSI", "RSI_STD", "MACD", "ATR_Filter", "Sector", "RelativeVolume", "ADX_DI", "Crossover"
+        # ===== New: Build a training dataset from the training trades =====
+        # Always initialize the training lists so they are always defined.
         X_train = []
         y_train_pnl = []
         y_train_win = []
-        for trade in train_trades:
-            try:
-                # Build features in the order defined by feature_order.
-                row = [
-                    trade["RSI"],
-                    trade["RSI_STD"],
-                    trade["MACD"],
-                    trade["ATR_Filter"],
-                    trade["Sector"],
-                    trade["RelativeVolume"],
-                    trade["ADX_DI"],
-                    trade["Crossover"]
-                ]
-                X_train.append(row)
-                y_train_pnl.append(trade["PnL"])
-                y_train_win.append(trade["WinLoss"])
-            except KeyError as e:
-                logger.warning(f"Missing expected key {e} in trade data; skipping trade.")
         
+        # Process trades if any are available.
+        if train_trades:
+            for trade in train_trades:
+                try:
+                    # Build features in the order defined by feature_order.
+                    row = [
+                        trade["RSI"],
+                        trade["RSI_STD"],
+                        trade["MACD"],
+                        trade["ATR_Filter"],
+                        trade["Sector"],
+                        trade["RelativeVolume"],
+                        trade["ADX_DI"],
+                        trade["Crossover"]
+                    ]
+                    X_train.append(row)
+                    y_train_pnl.append(trade["PnL"])
+                    y_train_win.append(trade["WinLoss"])
+                except KeyError as e:
+                    logger.warning(f"Missing expected key {e} in trade data; skipping trade.")
+        
+        # Always check if X_train is defined (even if empty)
+        # Ensure X_train is not empty
         if X_train:
             X_train = np.array(X_train)
             y_train_pnl = np.array(y_train_pnl)
             y_train_win = np.array(y_train_win)
 
-            # Scale the training features.
+            # Check for zero-variance columns
+            std_dev = X_train.std(axis=0)
+            nonzero_cols = np.where(std_dev > 1e-8)[0]  # Keep columns with variance > epsilon
+            if len(nonzero_cols) == 0:
+                logger.warning("All columns in X_train have zero variance; skipping training iteration.")
+                continue  # Skip this iteration if no usable data
+
+            # Filter out zero-variance columns
+            X_train = X_train[:, nonzero_cols]
+
+            # Rebuild the model if input_dim changes
+            current_input_dim = X_train.shape[1]
+            if current_input_dim != input_dim:
+                input_dim = current_input_dim
+                model = build_neural_model(input_dim, learning_rate=current_lr)
+
+            # Scale the training features
             X_train_scaled = scaler.fit_transform(X_train)
 
-            # Train the model for a small number of epochs.
-            # Adjust epochs and batch_size as needed based on your data.
+            # Train the model
             history = model.fit(
                 X_train_scaled,
                 {"pnl": y_train_pnl, "win_loss": y_train_win},
@@ -1182,18 +1234,67 @@ def iterative_optimization(
 ###############################################################################
 #                                   MAIN                                      #
 ###############################################################################
+'''
 def main():
     
     logger.info("=== Starting Revised Neural Score Optimization ===")
     final_w = iterative_optimization(
         stock_library_csv="stock_library.csv",
-        iterations=3,  # Adjust iteration count as desired
-        base_weights={"rsi": 0.1, "rsi_std": 0.1, "macd": 0.1, "atr_filter": 0.1, "sector": 0.1, "rvol": 0.1, "adx_di": 0.1, "crossover": 0.1}
+        iterations=200,  # Adjust iteration count as desired
+        base_weights={"rsi": 0.1346593201160431,
+                      "rsi_std": 0.12247657030820847,
+                      "macd": 0.14777715504169464,
+                      "atr_filter": 0.12393946200609207,
+                      "sector": 0.11621066927909851,
+                      "rvol": 0.1337585151195526,
+                      "adx_di": 0.11782931536436081,
+                      "crossover": 0.1033490002155304}
     )
     logger.info(f"Final Weights after all iterations: {final_w}")
     with open("optimized_weights.json", "w") as f:
         json.dump(final_w, f)
     logger.info("Saved final weights to optimized_weights.json.")
+
+if __name__ == "__main__":
+    main()
+'''
+def main():
+    logger.info("=== Starting Backtest ===")
+
+    # Set the backtest parameters
+    start_date = datetime(2024, 1, 1)
+    end_date = datetime(2025, 1, 21)
+
+    # Load all tickers from stock_library.csv
+    try:
+        stock_lib = pd.read_csv("stock_library.csv")
+        if "Ticker" not in stock_lib.columns:
+            raise ValueError("CSV must have a 'Ticker' column.")
+        tickers = stock_lib["Ticker"].dropna().unique().tolist()
+        if not tickers:
+            raise ValueError("No tickers found in stock_library.csv.")
+    except Exception as e:
+        logger.error(f"Error loading tickers from stock_library.csv: {e}")
+        sys.exit(1)
+
+    # Initial weights for the indicators
+    base_weights = {"rsi": 0.12442881613969803, "rsi_std": 0.12087585777044296, "macd": 0.13195861876010895, "atr_filter": 0.11658483743667603, "sector": 0.11400578916072845, "rvol": 0.13725993037223816, "adx_di": 0.12422795593738556, "crossover": 0.13065817952156067}
+
+    # Perform backtest
+    trades = backtest_strategy(
+        tickers=['BMR', 'ALTS', 'NUKK', 'OSS', 'WKEY', 'PHUN', 'GSIT', 'ZENA', 'VERI', 'PSQH', 'AISP', 'LAES', 'QMCO', 'GRRR', 'BKKT', 'ARBE', 'VUZI', 'IMMR', 'ATOM', 'PDYN', 'VLN', 'ALLT', 'TSSI', 'ARQQ', 'ZEO', 'BKSY', 'AEHR', 'GILT', 'POET', 'CRNT'],
+        start=start_date,
+        end=end_date,
+        sector_etf="XLK",
+        compare_index_etf="SPY",
+        volatility_threshold=1.0,
+        buy_score_threshold=0.7,
+        account_balance=5000.0,
+        allocation_pct=0.07,
+        stop_loss_multiplier=1.5,
+        profit_target_multiplier=3.0,
+        weights_dict=base_weights
+    )
 
 if __name__ == "__main__":
     main()

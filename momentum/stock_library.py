@@ -13,6 +13,7 @@ Objective:
 import os
 import sys
 import logging
+import time
 from typing import List
 
 import yfinance as yf
@@ -75,7 +76,7 @@ def build_low_volatility_query(lower_bound: float, upper_bound: float, volatilit
         logger.error(f"Error constructing low volatility query: {e}")
         sys.exit(1)
 
-def build_high_volume_query(lower_bound: float, upper_bound: float, volume_threshold: float = 200000) -> dict:
+def build_high_volume_query(lower_bound: float, upper_bound: float, volume_threshold: float = 20000) -> dict:
     """
     Constructs a query variant that requires a higher average volume.
     """
@@ -165,9 +166,14 @@ def build_stock_library(
     library = set()  # Using a set for uniqueness
     queries = [
         build_small_cap_query(50000000, 500000000),     # lower small cap
-        build_small_cap_query(500000000, 1000000000),    # mid small cap
-        build_small_cap_query(1000000000, 2000000000),   # upper small cap
-        build_low_volatility_query(50000000, 2000000000, volatility_threshold=200),
+        build_small_cap_query(500000000, 750000000),    # mid small cap
+        build_small_cap_query(750000000, 1000000000),
+        build_small_cap_query(1000000000, 1500000000),   # upper small cap
+        build_small_cap_query(1500000000, 2000000000),
+        build_high_volume_query(50000000, 1000000000),
+        build_high_volume_query(1000000000, 2000000000),
+        build_low_volatility_query(50000000, 1000000000),
+        build_low_volatility_query(1000000000, 2000000000)
     ]
     
     # Non-US suffixes to filter out tickers.
@@ -206,7 +212,6 @@ def build_stock_library(
                     logger.debug(f"Ticker {sym} rejected: inadequate historical data.")
                     continue
 
-                # Check for significant price change (minimum 10% change).
                 df = yf.download(sym, start="2019-01-01", progress=False)
                 if df.empty:
                     logger.debug(f"Ticker {sym} rejected: historical data download returned empty DataFrame.")
@@ -214,8 +219,8 @@ def build_stock_library(
                 # Ensure the 'Close' column is a Series by squeezing.
                 close_series = df['Close'].squeeze()
                 current_price = float(close_series.iloc[-1])
-                if current_price < 1.0:
-                    logger.debug(f"Ticker {sym} rejected: price ${current_price:.2f} is below $1.")
+                if current_price < 3.0:
+                    logger.debug(f"Ticker {sym} rejected: price ${current_price:.2f} is below $5.")
                     continue
 
                 library.add(sym)
